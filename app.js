@@ -99,8 +99,9 @@ let state = {
   privateNotes: []
 };
 
-// UI Filters
+// UI Filters & Navigation History
 let activeView = 'dashboard';
+let viewHistory = [];
 let activeDept = 'Front Office';
 let invCategoryFilter = 'ALL';
 let deptCategoryFilter = 'ALL';
@@ -779,10 +780,72 @@ function toggleMobileSidebar(forceState) {
 // ==============================================================================
 // 7. VIEW ROUTING & SPA TAB MANAGEMENT
 // ==============================================================================
-function navigateTo(viewId) {
+function updateTopbarBackButton() {
+  const backBtn = document.getElementById('btn-topbar-back');
+  if (!backBtn) return;
+
+  const isNoteEditorOpen =
+    activeView === 'notes' &&
+    Boolean(currentEditingNote) &&
+    !document.getElementById('notes-editor-view')?.classList.contains('hidden');
+
+  const canGoBack = isNoteEditorOpen || viewHistory.length > 0 || activeView !== 'dashboard';
+  backBtn.disabled = !canGoBack;
+
+  if (isNoteEditorOpen) {
+    backBtn.title = 'Kembali ke Daftar Catatan';
+  } else if (viewHistory.length > 0) {
+    const prev = viewHistory[viewHistory.length - 1];
+    backBtn.title = `Kembali ke ${prev}`;
+  } else if (activeView !== 'dashboard') {
+    backBtn.title = 'Kembali ke Dashboard';
+  } else {
+    backBtn.title = 'Sudah di Dashboard';
+  }
+}
+
+function goBackNavigation() {
+  const isNoteEditorOpen =
+    activeView === 'notes' &&
+    Boolean(currentEditingNote) &&
+    !document.getElementById('notes-editor-view')?.classList.contains('hidden');
+
+  if (isNoteEditorOpen) {
+    closeNoteEditor();
+    return;
+  }
+
+  if (viewHistory.length > 0) {
+    const prevView = viewHistory.pop();
+    navigateTo(prevView, { isBack: true });
+    return;
+  }
+
+  if (activeView !== 'dashboard') {
+    navigateTo('dashboard', { isBack: true });
+  }
+}
+
+function navigateTo(viewId, options = {}) {
+  const isBack = Boolean(options && options.isBack);
+
   // Auto-save note immediately if leaving editor
   if (currentEditingNote) {
-    saveCurrentNote(true);
+    if (canUserModifyNote(currentEditingNote, currentEditingNote.type)) {
+      saveCurrentNote(true);
+    }
+    if (viewId !== 'notes') {
+      currentEditingNote = null;
+      document.getElementById('notes-editor-view')?.classList.add('hidden');
+      document.getElementById('notes-list-view')?.classList.remove('hidden');
+    }
+  }
+
+  if (!isBack && activeView && activeView !== viewId) {
+    if (viewHistory[viewHistory.length - 1] !== activeView) {
+      viewHistory.push(activeView);
+      if (viewHistory.length > 25) viewHistory.shift();
+    }
   }
 
   activeView = viewId;
@@ -808,6 +871,7 @@ function navigateTo(viewId) {
     activeBtn.classList.remove('text-slate-300');
   }
 
+  updateTopbarBackButton();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
   if (viewId === 'dashboard') renderDashboard();
@@ -3746,7 +3810,8 @@ function setCurrentSessionUser(user) {
   document.getElementById('app-shell')?.classList.remove('hidden');
 
   loadApplicationData();
-  navigateTo('dashboard');
+  viewHistory = [];
+  navigateTo('dashboard', { isBack: true });
 }
 
 async function handleLogout() {
@@ -3759,6 +3824,7 @@ async function handleLogout() {
   }
 
   currentUser = null;
+  viewHistory = [];
   localStorage.removeItem(STORAGE_KEYS.AUTH_USER);
 
   document.getElementById('app-shell')?.classList.add('hidden');
@@ -5526,6 +5592,8 @@ function exportPCMovementsExcel() {
   showToast('Excel PC Movement Analytics berhasil didownload!', 'success');
 }
 window.navigateTo = navigateTo;
+window.goBackNavigation = goBackNavigation;
+window.updateTopbarBackButton = updateTopbarBackButton;
 window.selectDepartmentAndNavigate = selectDepartmentAndNavigate;
 window.switchActiveDepartment = switchActiveDepartment;
 window.setInvCategoryFilter = setInvCategoryFilter;
@@ -6106,6 +6174,7 @@ function startNewNote() {
 
   updateEditorWordCount();
   updateEditorToolbarStates();
+  updateTopbarBackButton();
 
   window.scrollTo({ top: 0, behavior: 'smooth' });
   setTimeout(() => {
@@ -6196,6 +6265,7 @@ function openNoteEditor(noteId, noteType) {
 
   updateEditorWordCount();
   updateEditorToolbarStates();
+  updateTopbarBackButton();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -6249,6 +6319,7 @@ function closeNoteEditor() {
   document.getElementById('notes-list-view')?.classList.remove('hidden');
 
   updateEditorToolbarStates();
+  updateTopbarBackButton();
   renderNotesCards();
   updateNotesCounter();
 }
