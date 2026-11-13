@@ -1,0 +1,6 @@
+1. uploud file 1 dan 2 pada supabase(SQL Editor)
+2. Masuk ke ukun Github (new repository)
+3. upload existing file ada github
+4. open vercel create new project (ambil dari repository github)
+masukan anon key vercel berikut  (eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtbHJhdWN2a2dxbmlnZWdkY3RzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM5NDc2NzUsImV4cCI6MjEwOTUyMzY3NX0.XkFSmXAVwGrBNlCPrN6hugeUCBQLRm7YGFX6pRfyEnk)
+masukan url supabase berikut ( https://emlraucvkgqnigegdcts.supabase.co )
