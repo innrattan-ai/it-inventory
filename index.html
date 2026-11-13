@@ -433,8 +433,8 @@
     <header class="sticky top-0 z-40 bg-slate-900/90 backdrop-blur-md border-b border-slate-800">
       <div class="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-4">
 
-        <!-- Left: Logo & Menu Toggle (Always hamburger drawer) -->
-        <div class="flex items-center gap-2 sm:gap-3 min-w-0">
+        <!-- Left: Menu Toggle & Back Button -->
+        <div class="flex items-center gap-2 sm:gap-2.5 min-w-0">
           <button
             type="button"
             id="mobile-menu-btn"
@@ -444,15 +444,18 @@
           >
             <i class="fa-solid fa-bars"></i>
           </button>
-          <div class="flex items-center gap-2 sm:gap-3 cursor-pointer min-w-0" onclick="navigateTo('dashboard')">
-            <div class="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-slate-900 border border-slate-700/80 flex items-center justify-center p-1.5 shadow-md shadow-pink-500/10 flex-shrink-0">
-              <img src="/public/assets/rattan_inn_logo.png" alt="Rattan-Inn Logo" class="w-full h-full object-contain">
-            </div>
-            <div class="min-w-0">
-              <div class="font-bold text-white tracking-tight leading-tight text-xs sm:text-base truncate">Rattan-Inn Hotel IT Assets Control</div>
-              <div class="text-[9px] sm:text-[11px] text-slate-400 hidden xs:block truncate">IT Infrastructure & Hardware Control</div>
-            </div>
-          </div>
+          <button
+            type="button"
+            id="btn-topbar-back"
+            onclick="goBackNavigation()"
+            disabled
+            title="Sudah di Dashboard"
+            aria-label="Kembali ke halaman sebelumnya atau Dashboard"
+            class="px-3 py-1.5 sm:py-2 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700/70 hover:border-indigo-500/50 transition text-xs font-semibold flex items-center gap-1.5 shadow-sm disabled:opacity-40 disabled:pointer-events-none"
+          >
+            <i class="fa-solid fa-arrow-left text-indigo-400"></i>
+            <span>Back</span>
+          </button>
         </div>
 
         <!-- Center: Quick Counter Indicators (Desktop) -->
@@ -681,6 +684,42 @@
             <i class="fa-solid fa-sliders w-5 text-center text-slate-400"></i>
             <span>Settings & BaaS</span>
           </button>
+        </div>
+
+        <!-- Credits Card (Paling Bawah Sidebar di bawah Settings) -->
+        <div id="sidebar-credits-card" class="stat-card-modern border-indigo mt-4 p-3.5 relative overflow-hidden">
+          <div class="soft-light-orb -right-8 -top-8 w-24 h-24 bg-indigo-500/15 pointer-events-none"></div>
+          <div class="flex items-center justify-between mb-2.5 relative z-10">
+            <span class="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-indigo-300">
+              <i class="fa-solid fa-code text-indigo-400"></i>
+              Credits
+            </span>
+            <span class="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
+          </div>
+          <div class="flex items-start gap-3 relative z-10">
+            <button
+              type="button"
+              onclick="openLightbox('/public/assets/aistudio/andi_imgaa_e815bd92.png', 'Andi Naufal - IT Trainee July - December 2026 SMK muhammadiyah 3')"
+              title="Lihat Foto"
+              class="w-12 h-12 rounded-xl overflow-hidden border border-indigo-400/50 bg-slate-950 shadow-md ring-2 ring-indigo-500/20 flex-shrink-0 hover:scale-105 transition cursor-pointer"
+            >
+              <img
+                src="/public/assets/aistudio/andi_imgaa_e815bd92.png"
+                alt="Andi Naufal"
+                class="w-full h-full object-cover"
+              >
+            </button>
+            <div class="min-w-0 space-y-1 text-[11px] leading-snug">
+              <p class="text-slate-300">
+                <span class="text-slate-400">This App Made with:</span>
+                <strong class="text-white font-semibold block">Google AI Studio</strong>
+              </p>
+              <p class="text-slate-300">
+                <span class="text-slate-400">By:</span>
+                <span class="text-indigo-200 font-medium">Andi Naufal, IT Trainee July - December 2026 SMK muhammadiyah 3</span>
+              </p>
+            </div>
+          </div>
         </div>
       </aside>
 
