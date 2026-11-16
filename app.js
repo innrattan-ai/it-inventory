@@ -109,6 +109,8 @@ let prelovedCategoryFilter = 'ALL';
 let poStatusFilter = 'ALL';
 let currentMonthlyTab = 'inbound';
 let pendingPhotoDataUrl = null;
+let editItemPendingDataUrl = null;
+let editItemClearedPhoto = false;
 
 // PC Management & Workstation UI State
 let pcFilter = 'ALL'; // 'ALL' | 'IN_DEPT' | 'READY'
@@ -116,9 +118,28 @@ let pcMovementTab = 'pc'; // 'pc' | 'component'
 let currentDetailPCId = null;
 let currentActionSlot = null; // { pcId, slotKey, slotLabel }
 let currentInstallTarget = null; // { pcId, slotKey, slotLabel }
+let addPCComponentSearchQuery = '';
+let installComponentSearchQuery = '';
+let swapTargetPCSearchQuery = '';
+let pcAssemblyState = {
+  active: false,
+  tray: [],
+  slots: {
+    psu_item_id: null,
+    storage_item_id: null,
+    storage2_item_id: null,
+    ram1_item_id: null,
+    ram2_item_id: null,
+    ram3_item_id: null,
+    vga_item_id: null
+  }
+};
+let selectedTrayItemIdForClickAssign = null;
+let draggedAssemblyPayload = null;
 
 // Notes & Workspace Documentation State
 let activeNotesTab = 'all'; // 'all' | 'shared' | 'private'
+let dashboardNotesFilter = 'all'; // 'all' | 'shared' | 'private'
 let notesSearchQuery = '';
 let currentEditingNote = null; // { id, type, isNew, originalCreatedBy, ... }
 let noteAutoSaveTimer = null;
@@ -450,7 +471,9 @@ async function syncAllFromSupabaseQuietly() {
       activitiesRes,
       pcsRes,
       pcMovRes,
-      pcCompMovRes
+      pcCompMovRes,
+      sharedNotesRes,
+      privateNotesRes
     ] = await Promise.all([
       supabaseClient.from('master_items').select('*').order('created_at', { ascending: false }),
       supabaseClient.from('stock_transactions').select('*').order('transaction_date', { ascending: false }),
@@ -678,6 +701,18 @@ function isReductionTx(tx) {
 // Available = Total Inbound - Total Reduced - Transferred to Depts + Returned to Inventory
 // Dept Held = Received - Returned
 // ==============================================================================
+function getAssemblyReservedCount(itemId) {
+  if (!pcAssemblyState || !pcAssemblyState.active || !itemId) return 0;
+  let count = 0;
+  for (const t of pcAssemblyState.tray) {
+    if (t.itemId === itemId) count += 1;
+  }
+  for (const val of Object.values(pcAssemblyState.slots)) {
+    if (val === itemId) count += 1;
+  }
+  return count;
+}
+
 function calculateStockMetrics(itemId) {
   const inbounds = state.stockTransactions.filter(t => t.item_id === itemId && !isReductionTx(t));
   const totalInbound = inbounds.reduce((sum, t) => sum + (Number(t.quantity) || 0), 0);
@@ -693,7 +728,8 @@ function calculateStockMetrics(itemId) {
   const returns = state.departmentMovements.filter(m => m.item_id === itemId && (m.type === 'RETURN_TO_INVENTORY' || m.type === 'RETURN FROM PC'));
   const totalReturned = returns.reduce((sum, m) => sum + (Number(m.quantity) || 0), 0);
 
-  const availableStock = Math.max(0, totalInbound - totalReduced - totalTransferred + totalReturned);
+  const reservedInAssembly = getAssemblyReservedCount(itemId);
+  const availableStock = Math.max(0, totalInbound - totalReduced - totalTransferred + totalReturned - reservedInAssembly);
 
   // Department-specific physical held inventory
   const deptTransfers = state.departmentMovements.filter(m => m.item_id === itemId && m.type === 'TRANSFER_TO_DEPARTMENT');
@@ -887,6 +923,7 @@ function navigateTo(viewId, options = {}) {
 }
 
 function refreshAllViews() {
+  window.state = state;
   updateHeaderCounters();
   renderDashboard();
   renderInventoryTable();
@@ -994,7 +1031,7 @@ function renderDashboard() {
     }).join('');
   }
 
-  // Category Breakdown
+  // Category Breakdown (Interactive / Clickable -> Inventory Filtered by Category)
   const catContainer = document.getElementById('dashboard-categories-container');
   if (catContainer) {
     const pcCount = state.masterItems.filter(i => i.category === 'PC ITEMS').length;
@@ -1003,57 +1040,71 @@ function renderDashboard() {
     const lockCount = state.masterItems.filter(i => i.category === 'LOCK SYSTEM').length;
     const total = state.masterItems.length || 1;
 
-    catContainer.innerHTML = `
-      <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-cyan-500/40 transition">
-        <div class="flex justify-between text-xs mb-1.5">
-          <span class="text-slate-300 font-semibold flex items-center gap-1.5">
-            <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
-            PC ITEMS
-          </span>
-          <span class="text-cyan-300 font-mono font-bold">${pcCount} (${Math.round((pcCount / total) * 100)}%)</span>
-        </div>
-        <div class="w-full h-2 rounded-full bg-slate-800/90 overflow-hidden p-0.5">
-          <div class="h-full bg-gradient-to-r from-cyan-500 to-cyan-300 rounded-full shadow-sm shadow-cyan-500/50" style="width: ${(pcCount / total) * 100}%"></div>
-        </div>
-      </div>
-      <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-indigo-500/40 transition">
-        <div class="flex justify-between text-xs mb-1.5">
-          <span class="text-slate-300 font-semibold flex items-center gap-1.5">
-            <span class="w-2 h-2 rounded-full bg-indigo-400"></span>
-            NETWORK ITEMS
-          </span>
-          <span class="text-indigo-300 font-mono font-bold">${netCount} (${Math.round((netCount / total) * 100)}%)</span>
-        </div>
-        <div class="w-full h-2 rounded-full bg-slate-800/90 overflow-hidden p-0.5">
-          <div class="h-full bg-gradient-to-r from-indigo-500 to-indigo-300 rounded-full shadow-sm shadow-indigo-500/50" style="width: ${(netCount / total) * 100}%"></div>
-        </div>
-      </div>
-      <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-amber-500/40 transition">
-        <div class="flex justify-between text-xs mb-1.5">
-          <span class="text-slate-300 font-semibold flex items-center gap-1.5">
-            <span class="w-2 h-2 rounded-full bg-amber-400"></span>
-            CCTV & TV ITEMS
-          </span>
-          <span class="text-amber-300 font-mono font-bold">${cctvCount} (${Math.round((cctvCount / total) * 100)}%)</span>
-        </div>
-        <div class="w-full h-2 rounded-full bg-slate-800/90 overflow-hidden p-0.5">
-          <div class="h-full bg-gradient-to-r from-amber-500 to-amber-300 rounded-full shadow-sm shadow-amber-500/50" style="width: ${(cctvCount / total) * 100}%"></div>
-        </div>
-      </div>
-      <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-emerald-500/40 transition">
-        <div class="flex justify-between text-xs mb-1.5">
-          <span class="text-slate-300 font-semibold flex items-center gap-1.5">
-            <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
-            LOCK SYSTEM
-          </span>
-          <span class="text-emerald-300 font-mono font-bold">${lockCount} (${Math.round((lockCount / total) * 100)}%)</span>
-        </div>
-        <div class="w-full h-2 rounded-full bg-slate-800/90 overflow-hidden p-0.5">
-          <div class="h-full bg-gradient-to-r from-emerald-500 to-emerald-300 rounded-full shadow-sm shadow-emerald-500/50" style="width: ${(lockCount / total) * 100}%"></div>
-        </div>
-      </div>
-    `;
+    const breakdownItems = [
+      {
+        cat: 'PC ITEMS',
+        count: pcCount,
+        dotClass: 'bg-cyan-400',
+        textClass: 'text-cyan-300',
+        barClass: 'from-cyan-500 to-cyan-300 shadow-cyan-500/50',
+        hoverClass: 'hover:border-cyan-500/50 hover:bg-cyan-950/20'
+      },
+      {
+        cat: 'NETWORK ITEMS',
+        count: netCount,
+        dotClass: 'bg-indigo-400',
+        textClass: 'text-indigo-300',
+        barClass: 'from-indigo-500 to-indigo-300 shadow-indigo-500/50',
+        hoverClass: 'hover:border-indigo-500/50 hover:bg-indigo-950/20'
+      },
+      {
+        cat: 'CCTV & TV ITEMS',
+        count: cctvCount,
+        dotClass: 'bg-amber-400',
+        textClass: 'text-amber-300',
+        barClass: 'from-amber-500 to-amber-300 shadow-amber-500/50',
+        hoverClass: 'hover:border-amber-500/50 hover:bg-amber-950/20'
+      },
+      {
+        cat: 'LOCK SYSTEM',
+        count: lockCount,
+        dotClass: 'bg-emerald-400',
+        textClass: 'text-emerald-300',
+        barClass: 'from-emerald-500 to-emerald-300 shadow-emerald-500/50',
+        hoverClass: 'hover:border-emerald-500/50 hover:bg-emerald-950/20'
+      }
+    ];
+
+    catContainer.innerHTML = breakdownItems.map(item => {
+      const pct = Math.round((item.count / total) * 100);
+      const barWidth = (item.count / total) * 100;
+      return `
+        <button
+          type="button"
+          onclick="openInventoryByCategory('${item.cat}')"
+          title="Klik untuk melihat stok ${item.cat} di Inventory"
+          class="w-full text-left p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 ${item.hoverClass} transition cursor-pointer group focus:outline-none focus:ring-2 focus:ring-cyan-500/40"
+        >
+          <div class="flex items-center justify-between gap-2 text-xs mb-1.5">
+            <span class="text-slate-300 group-hover:text-white font-semibold flex items-center gap-1.5 min-w-0 truncate">
+              <span class="w-2 h-2 rounded-full ${item.dotClass} shrink-0"></span>
+              <span class="truncate">${item.cat}</span>
+            </span>
+            <span class="flex items-center gap-1.5 shrink-0">
+              <span class="${item.textClass} font-mono font-bold">${item.count} (${pct}%)</span>
+              <i class="fa-solid fa-arrow-right text-[10px] text-slate-600 group-hover:text-white group-hover:translate-x-0.5 transition"></i>
+            </span>
+          </div>
+          <div class="w-full h-2 rounded-full bg-slate-800/90 overflow-hidden p-0.5">
+            <div class="h-full bg-gradient-to-r ${item.barClass} rounded-full shadow-sm transition-all duration-300" style="width: ${barWidth}%"></div>
+          </div>
+        </button>
+      `;
+    }).join('');
   }
+
+  // Dashboard Note Workspace Widget
+  renderDashboardNotesWidget();
 
   // Recent Activities
   const actList = document.getElementById('dashboard-activities-list');
@@ -1270,11 +1321,16 @@ function renderDashboardPCRootTopology() {
                   ` : `
                     <div class="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pr-1">
                       ${readyPCList.map(pc => `
-                        <div class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-emerald-950/40 border border-emerald-500/30 text-emerald-200 text-[11px] font-mono">
-                          <i class="fa-solid fa-desktop text-[10px] text-emerald-400"></i>
-                          <span class="font-semibold">${escapeHtml(pc.name)}</span>
-                          <span class="text-[9px] text-emerald-400/60 font-sans">(${escapeHtml(pc.chipset || 'PC')})</span>
-                        </div>
+                        <button
+                          type="button"
+                          onclick="event.stopPropagation(); openPCDetailFromDashboard('${pc.id}')"
+                          title="Buka detail komponen ${escapeHtml(pc.name)}"
+                          class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-950/50 hover:bg-emerald-900/70 border border-emerald-500/35 hover:border-emerald-400 text-emerald-200 hover:text-white text-[11px] font-mono transition cursor-pointer shadow-sm"
+                        >
+                          <i class="fa-solid fa-desktop text-[10px] text-emerald-400 shrink-0"></i>
+                          <span class="font-semibold truncate max-w-[130px]">${escapeHtml(pc.name)}</span>
+                          <span class="text-[9px] text-emerald-400/70 font-sans hidden sm:inline">(${escapeHtml(pc.chipset || 'PC')})</span>
+                        </button>
                       `).join('')}
                     </div>
                   `}
@@ -1298,7 +1354,7 @@ function renderDashboardPCRootTopology() {
                   </div>
                   <div>
                     <div class="text-xs font-bold text-white">Akar Terpasang di Departemen</div>
-                    <div class="text-[10px] text-amber-400/80 font-medium">In-Service Operations</div>
+                    <div class="text-[10px] text-amber-400/80 font-medium">Klik departemen atau nama PC untuk buka langsung</div>
                   </div>
                 </div>
                 <div class="flex items-center gap-2">
@@ -1319,11 +1375,22 @@ function renderDashboardPCRootTopology() {
                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
                   ${deptBreakdown.map(item => {
                     const hasPC = item.count > 0;
+                    const escapedDept = item.department.replace(/'/g, "\\'");
                     return `
-                      <div class="p-2.5 rounded-xl ${hasPC ? 'bg-amber-950/20 border-amber-500/40 shadow-sm shadow-amber-500/5' : 'bg-slate-950/40 border-slate-800/80 opacity-70'} border transition hover:border-amber-400/60">
-                        <div class="flex items-center justify-between">
-                          <span class="text-xs font-bold ${hasPC ? 'text-amber-200' : 'text-slate-400'} truncate">${escapeHtml(item.department)}</span>
-                          <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${hasPC ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-slate-800 text-slate-500'}">
+                      <div
+                        role="button"
+                        tabindex="0"
+                        onclick="event.stopPropagation(); selectDepartmentAndNavigate('${escapedDept}')"
+                        onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();event.stopPropagation();selectDepartmentAndNavigate('${escapedDept}');}"
+                        title="Klik untuk membuka Departmental Asset ${escapeHtml(item.department)}"
+                        class="p-2.5 rounded-xl ${hasPC ? 'bg-amber-950/20 border-amber-500/40 shadow-sm shadow-amber-500/5 hover:bg-amber-950/35' : 'bg-slate-950/40 border-slate-800/80 opacity-85 hover:opacity-100 hover:bg-slate-900/60'} border transition hover:border-amber-400 cursor-pointer group/dept"
+                      >
+                        <div class="flex items-center justify-between gap-1.5">
+                          <span class="text-xs font-bold ${hasPC ? 'text-amber-200 group-hover/dept:text-amber-100' : 'text-slate-300 group-hover/dept:text-amber-200'} truncate flex items-center gap-1">
+                            <span class="truncate">${escapeHtml(item.department)}</span>
+                            <i class="fa-solid fa-arrow-up-right-from-square text-[9px] opacity-60 group-hover/dept:opacity-100 shrink-0"></i>
+                          </span>
+                          <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold shrink-0 ${hasPC ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-slate-800 text-slate-400'}">
                             ${item.count} PC
                           </span>
                         </div>
@@ -1331,16 +1398,21 @@ function renderDashboardPCRootTopology() {
                         ${hasPC ? `
                           <div class="mt-2 flex flex-wrap gap-1">
                             ${item.pcs.map(p => `
-                              <span class="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900/90 text-amber-200 border border-amber-500/30" title="${escapeHtml(p.name)} (${escapeHtml(p.chipset || '-')})">
-                                <i class="fa-solid fa-desktop text-[8px] text-amber-400"></i>
+                              <button
+                                type="button"
+                                onclick="event.stopPropagation(); openPCDetailFromDashboard('${p.id}')"
+                                class="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-md bg-slate-900/95 hover:bg-indigo-600/30 text-amber-200 hover:text-white border border-amber-500/35 hover:border-indigo-400 transition cursor-pointer"
+                                title="Klik untuk melihat detail &amp; komponen ${escapeHtml(p.name)} (${escapeHtml(p.chipset || '-')})"
+                              >
+                                <i class="fa-solid fa-desktop text-[8px] text-amber-400 shrink-0"></i>
                                 <span class="truncate max-w-[100px]">${escapeHtml(p.name)}</span>
-                              </span>
+                              </button>
                             `).join('')}
                           </div>
                         ` : `
                           <div class="text-[10px] text-slate-500 mt-1 flex items-center gap-1 font-mono">
                             <i class="fa-regular fa-circle text-[8px]"></i>
-                            <span>Kapasitas Tersedia</span>
+                            <span>Lihat Aset Dept</span>
                           </div>
                         `}
                       </div>
@@ -1361,6 +1433,16 @@ function renderDashboardPCRootTopology() {
 function selectDepartmentAndNavigate(deptName) {
   activeDept = deptName;
   navigateTo('departmental');
+}
+
+function openPCDetailFromDashboard(pcId) {
+  navigateTo('pc-management');
+  openModalPCDetail(pcId);
+}
+
+function openInventoryByCategory(cat) {
+  navigateTo('inventory');
+  setInvCategoryFilter(cat || 'ALL');
 }
 
 // ==============================================================================
@@ -1460,6 +1542,14 @@ function renderInventoryTable() {
               class="p-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white transition text-xs shrink-0"
             >
               <i class="fa-solid fa-plus"></i>
+            </button>
+            <button
+              type="button"
+              onclick="openModalEditItem('${item.id}')"
+              title="Edit Nama, Remark &amp; Foto Barang"
+              class="p-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 transition text-xs border border-amber-500/30 shrink-0"
+            >
+              <i class="fa-solid fa-pen-to-square"></i>
             </button>
             <button
               type="button"
@@ -1629,6 +1719,208 @@ async function confirmDeleteMasterItem(itemId, itemName) {
 }
 
 // ==============================================================================
+// 9B. EDIT MASTER ITEM & AUTO-SYNC PROPAGATION (INVENTORY -> DEPT & PC MGMT)
+// ==============================================================================
+function openModalEditItem(itemId) {
+  const item = state.masterItems.find(i => i.id === itemId);
+  if (!item) return;
+
+  editItemPendingDataUrl = null;
+  editItemClearedPhoto = false;
+
+  const idEl = document.getElementById('edit-item-id');
+  const nameEl = document.getElementById('edit-item-name');
+  const codeEl = document.getElementById('edit-item-code');
+  const catEl = document.getElementById('edit-item-category');
+  const remarkEl = document.getElementById('edit-item-remark');
+  const fileEl = document.getElementById('edit-item-file');
+  const urlEl = document.getElementById('edit-item-url');
+  const previewEl = document.getElementById('edit-item-preview');
+  const previewContainer = document.getElementById('edit-item-preview-container');
+
+  if (idEl) idEl.value = item.id;
+  if (nameEl) nameEl.value = item.item_name || '';
+  if (codeEl) codeEl.value = item.item_code || 'SKU-GEN';
+  if (catEl) catEl.value = item.category || 'PC ITEMS';
+  if (remarkEl) remarkEl.value = item.remark || '';
+  if (fileEl) fileEl.value = '';
+  if (urlEl) urlEl.value = (item.photo_url && item.photo_url.startsWith('http')) ? item.photo_url : '';
+
+  if (item.photo_url) {
+    if (previewEl) previewEl.src = item.photo_url;
+    previewContainer?.classList.remove('hidden');
+  } else {
+    if (previewEl) previewEl.src = '';
+    previewContainer?.classList.add('hidden');
+  }
+
+  openModal('modal-edit-item');
+}
+
+function handleEditItemFilePreview(event) {
+  const file = event?.target?.files?.[0];
+  if (!file) return;
+
+  editItemClearedPhoto = false;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    editItemPendingDataUrl = ev.target?.result || null;
+    const preview = document.getElementById('edit-item-preview');
+    const container = document.getElementById('edit-item-preview-container');
+    if (preview && editItemPendingDataUrl) preview.src = editItemPendingDataUrl;
+    if (container) container.classList.remove('hidden');
+  };
+  reader.readAsDataURL(file);
+}
+
+function handleEditItemUrlPreview(url) {
+  const trimmed = (url || '').trim();
+  const preview = document.getElementById('edit-item-preview');
+  const container = document.getElementById('edit-item-preview-container');
+  if (trimmed && (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('data:image/'))) {
+    editItemClearedPhoto = false;
+    editItemPendingDataUrl = trimmed;
+    if (preview) preview.src = trimmed;
+    container?.classList.remove('hidden');
+  }
+}
+
+function clearEditItemPhoto() {
+  editItemPendingDataUrl = null;
+  editItemClearedPhoto = true;
+  const fileEl = document.getElementById('edit-item-file');
+  const urlEl = document.getElementById('edit-item-url');
+  const preview = document.getElementById('edit-item-preview');
+  const container = document.getElementById('edit-item-preview-container');
+  if (fileEl) fileEl.value = '';
+  if (urlEl) urlEl.value = '';
+  if (preview) preview.src = '';
+  container?.classList.add('hidden');
+}
+
+async function handleEditMasterItemSubmit(e) {
+  e.preventDefault();
+
+  const itemId = document.getElementById('edit-item-id')?.value;
+  const newName = (document.getElementById('edit-item-name')?.value || '').trim();
+  const newCategory = document.getElementById('edit-item-category')?.value || 'PC ITEMS';
+  const newRemark = (document.getElementById('edit-item-remark')?.value || '').trim();
+  const fileInput = document.getElementById('edit-item-file');
+  const urlInput = (document.getElementById('edit-item-url')?.value || '').trim();
+  const submitBtn = document.getElementById('btn-submit-edit-item');
+
+  if (!itemId || !newName) {
+    showToast('Nama barang tidak boleh kosong!', 'error');
+    return;
+  }
+
+  const item = state.masterItems.find(i => i.id === itemId);
+  if (!item) return;
+
+  if (submitBtn) submitBtn.disabled = true;
+
+  let finalPhotoUrl = editItemClearedPhoto ? null : (item.photo_url || null);
+
+  try {
+    if (fileInput && fileInput.files && fileInput.files.length > 0) {
+      const file = fileInput.files[0];
+      if (isLiveSupabase && supabaseClient) {
+        const fileExt = (file.name.split('.').pop() || 'png').toLowerCase();
+        const filePath = `${itemId}-edit-${Date.now()}.${fileExt}`;
+        const { error: storageError } = await supabaseClient
+          .storage
+          .from('photos')
+          .upload(filePath, file, { cacheControl: '3600', upsert: true });
+
+        if (!storageError) {
+          const { data: pubData } = supabaseClient.storage.from('photos').getPublicUrl(filePath);
+          if (pubData?.publicUrl) finalPhotoUrl = pubData.publicUrl;
+        } else {
+          console.warn('Edit item storage upload warning:', storageError.message);
+          finalPhotoUrl = editItemPendingDataUrl || finalPhotoUrl;
+        }
+      } else {
+        finalPhotoUrl = editItemPendingDataUrl || finalPhotoUrl;
+      }
+    } else if (urlInput) {
+      finalPhotoUrl = urlInput;
+    } else if (editItemClearedPhoto) {
+      finalPhotoUrl = null;
+    }
+
+    const oldName = item.item_name;
+    const nowIso = new Date().toISOString();
+    const actor = currentUser ? currentUser.email : 'admin@hotel.com';
+
+    item.item_name = newName;
+    item.category = newCategory;
+    item.remark = newRemark || null;
+    item.photo_url = finalPhotoUrl;
+    item.updated_at = nowIso;
+    item.updated_by = actor;
+
+    // Auto-propagate updated name & photo to linked Purchase Orders and PC Component Movements
+    (state.purchaseOrders || []).forEach(po => {
+      if (po.item_id === itemId) {
+        po.item_name = newName;
+        po.category = newCategory;
+        po.photo_url = finalPhotoUrl;
+      }
+    });
+
+    (state.pcComponentMovements || []).forEach(cm => {
+      if (cm.item_id === itemId) {
+        cm.item_name = newName;
+      }
+    });
+
+    if (isLiveSupabase && supabaseClient) {
+      const { error } = await supabaseClient
+        .from('master_items')
+        .update({
+          item_name: newName,
+          category: newCategory,
+          remark: newRemark || null,
+          photo_url: finalPhotoUrl,
+          updated_at: nowIso
+        })
+        .eq('id', itemId);
+
+      if (error) console.warn('Supabase update master item error:', error);
+
+      supabaseClient
+        .from('purchase_orders')
+        .update({ item_name: newName, category: newCategory })
+        .eq('item_id', itemId)
+        .then(() => {});
+
+      supabaseClient
+        .from('pc_component_movements')
+        .update({ item_name: newName })
+        .eq('item_id', itemId)
+        .then(() => {});
+    }
+
+    const actionDesc = oldName !== newName
+      ? `Edit item "${oldName}" -> "${newName}"`
+      : `Update detail/foto item "${newName}"`;
+    logActivity(newName, newCategory, actionDesc, 'INVENTORY');
+    persistState();
+
+    // If PC detail modal is open in background, refresh it so name/photo immediately reflect
+    const pcDetailModal = document.getElementById('modal-pc-detail');
+    if (currentDetailPCId && pcDetailModal && !pcDetailModal.classList.contains('hidden')) {
+      openModalPCDetail(currentDetailPCId);
+    }
+
+    closeModal('modal-edit-item');
+    showToast(`Item "${newName}" diperbarui & otomatis tersinkronisasi ke Departmental Asset dan PC Management!`, 'success');
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
+}
+
+// ==============================================================================
 // 10. DEPARTMENTAL ASSET VIEW & INVARIANT TRANSFER/RETURN
 // ==============================================================================
 function renderDepartmentalView() {
@@ -1770,8 +2062,30 @@ function openModal(modalId) {
   document.getElementById(modalId)?.classList.remove('hidden');
 }
 
+function resetPCAssemblyState() {
+  pcAssemblyState = {
+    active: false,
+    tray: [],
+    slots: {
+      psu_item_id: null,
+      storage_item_id: null,
+      storage2_item_id: null,
+      ram1_item_id: null,
+      ram2_item_id: null,
+      ram3_item_id: null,
+      vga_item_id: null
+    }
+  };
+  selectedTrayItemIdForClickAssign = null;
+  draggedAssemblyPayload = null;
+}
+
 function closeModal(modalId) {
   document.getElementById(modalId)?.classList.add('hidden');
+  if (modalId === 'modal-add-pc' && pcAssemblyState && pcAssemblyState.active) {
+    resetPCAssemblyState();
+    refreshAllViews();
+  }
 }
 
 // Item Stock History Modal Logic (Inbound & Pengurangan Unit)
@@ -1782,6 +2096,7 @@ function openItemInboundHistoryModal(itemId) {
   if (!item) return;
 
   currentHistoryItemId = itemId;
+  document.getElementById('modal-hist-delete-confirm')?.classList.add('hidden');
 
   // Set modal header details
   const nameEl = document.getElementById('modal-hist-item-name');
@@ -1875,6 +2190,63 @@ function openReduceForCurrentItem() {
   if (!currentHistoryItemId) return;
   closeModal('modal-item-inbound-history');
   openModalReduceStock(currentHistoryItemId);
+}
+
+function openTransferForCurrentItem() {
+  if (!currentHistoryItemId) return;
+  closeModal('modal-item-inbound-history');
+  openModalTransfer(currentHistoryItemId);
+}
+
+function openEditForCurrentItem() {
+  if (!currentHistoryItemId) return;
+  closeModal('modal-item-inbound-history');
+  openModalEditItem(currentHistoryItemId);
+}
+
+function promptDeleteCurrentMasterItem() {
+  if (!currentHistoryItemId) return;
+  const item = state.masterItems.find(i => i.id === currentHistoryItemId);
+  if (!item) return;
+  const nameEl = document.getElementById('modal-hist-delete-name');
+  if (nameEl) nameEl.textContent = item.item_name;
+  document.getElementById('modal-hist-delete-confirm')?.classList.remove('hidden');
+}
+
+function cancelDeleteCurrentMasterItem() {
+  document.getElementById('modal-hist-delete-confirm')?.classList.add('hidden');
+}
+
+async function executeDeleteCurrentMasterItem() {
+  if (!currentHistoryItemId) return;
+  const itemId = currentHistoryItemId;
+  const item = state.masterItems.find(i => i.id === itemId);
+  if (!item) return;
+  const itemName = item.item_name;
+
+  if (isLiveSupabase && supabaseClient) {
+    await supabaseClient.from('master_items').delete().eq('id', itemId);
+  }
+
+  state.masterItems = state.masterItems.filter(i => i.id !== itemId);
+  state.stockTransactions = state.stockTransactions.filter(t => t.item_id !== itemId);
+  state.departmentMovements = state.departmentMovements.filter(m => m.item_id !== itemId);
+
+  const pcSlotKeys = ['psu_item_id', 'storage_item_id', 'storage2_item_id', 'ram1_item_id', 'ram2_item_id', 'ram3_item_id', 'vga_item_id'];
+  if (Array.isArray(state.pcs)) {
+    state.pcs.forEach(pc => {
+      pcSlotKeys.forEach(k => {
+        if (pc[k] === itemId) pc[k] = null;
+      });
+    });
+  }
+
+  logActivity(itemName, 'GENERAL', 'Deleted', 'INVENTORY');
+  cancelDeleteCurrentMasterItem();
+  currentHistoryItemId = null;
+  closeModal('modal-item-inbound-history');
+  persistState();
+  showToast(`Item "${itemName}" berhasil dihapus.`, 'info');
 }
 
 // ==============================================================================
@@ -2136,21 +2508,67 @@ async function handleInboundSubmit(e) {
 
 // Transfer Modal
 function openModalTransfer(preselectedItemId = null) {
-  const select = document.getElementById('transfer-item-id');
   const dateInput = document.getElementById('transfer-date');
+  const searchInput = document.getElementById('transfer-item-search');
+  const catFilterEl = document.getElementById('transfer-item-cat-filter');
+  const onlyAvailEl = document.getElementById('transfer-only-available');
+
   if (dateInput) dateInput.value = new Date().toISOString().split('T')[0];
+  if (searchInput) searchInput.value = '';
+  if (catFilterEl) catFilterEl.value = 'ALL';
+  if (onlyAvailEl) onlyAvailEl.checked = false;
+
+  filterTransferItems(preselectedItemId);
+  openModal('modal-transfer');
+}
+
+function filterTransferItems(preferredItemId = null) {
+  const select = document.getElementById('transfer-item-id');
+  const searchInput = document.getElementById('transfer-item-search');
+  const catFilterEl = document.getElementById('transfer-item-cat-filter');
+  const onlyAvailEl = document.getElementById('transfer-only-available');
+  const countEl = document.getElementById('transfer-filter-count');
+
+  const kw = (searchInput?.value || '').toLowerCase().trim();
+  const cat = catFilterEl?.value || 'ALL';
+  const onlyAvail = Boolean(onlyAvailEl?.checked);
+  const currentSelected = preferredItemId || (select?.value || '');
+
+  const filtered = (state.masterItems || [])
+    .filter(item => {
+      if (cat !== 'ALL' && item.category !== cat) return false;
+      if (kw) {
+        const nameMatch = (item.item_name || '').toLowerCase().includes(kw);
+        const codeMatch = (item.item_code || '').toLowerCase().includes(kw);
+        const remarkMatch = (item.remark || '').toLowerCase().includes(kw);
+        const catMatch = (item.category || '').toLowerCase().includes(kw);
+        if (!nameMatch && !codeMatch && !remarkMatch && !catMatch) return false;
+      }
+      const { availableStock } = calculateStockMetrics(item.id);
+      if (onlyAvail && availableStock <= 0) return false;
+      return true;
+    });
+
+  if (countEl) {
+    countEl.textContent = `${filtered.length} dari ${(state.masterItems || []).length} barang`;
+  }
 
   if (select) {
-    select.innerHTML = state.masterItems.map(item => {
-      const { availableStock } = calculateStockMetrics(item.id);
-      return `<option value="${item.id}" ${item.id === preselectedItemId ? 'selected' : ''}>
-        ${escapeHtml(item.item_name)} (${item.category}) — Stok Tersedia: ${availableStock}
-      </option>`;
-    }).join('');
+    if (filtered.length === 0) {
+      select.innerHTML = `<option value="" disabled selected>-- Tidak ada barang yang cocok --</option>`;
+    } else {
+      const targetId = filtered.some(i => i.id === currentSelected) ? currentSelected : filtered[0].id;
+      select.innerHTML = filtered.map(item => {
+        const { availableStock } = calculateStockMetrics(item.id);
+        return `<option value="${item.id}" ${item.id === targetId ? 'selected' : ''}>
+          ${escapeHtml(item.item_name)} (${item.category}) — Stok Tersedia: ${availableStock}
+        </option>`;
+      }).join('');
+      select.value = targetId;
+    }
   }
 
   updateTransferAvailableStock();
-  openModal('modal-transfer');
 }
 
 function updateTransferAvailableStock() {
@@ -2159,6 +2577,11 @@ function updateTransferAvailableStock() {
   if (!select || !hint) return;
 
   const itemId = select.value;
+  if (!itemId) {
+    hint.textContent = 'Stok Tersedia di Gudang IT: 0 unit';
+    hint.className = 'text-[11px] text-rose-400 mt-1 font-semibold';
+    return;
+  }
   const { availableStock } = calculateStockMetrics(itemId);
   hint.textContent = `Stok Tersedia di Gudang IT: ${availableStock} unit`;
 
@@ -3680,22 +4103,113 @@ function exportFullBackupExcel() {
   const pcSummaryData = [
     ['HOTEL IT PC WORKSTATIONS INVENTORY LIST'],
     [],
-    ['No', 'Nama PC', 'Chipset', 'Departemen / Status', 'Power Supply', 'Storage', 'RAM Slot 1', 'RAM Slot 2', 'RAM Slot 3', 'VGA Card']
+    ['No', 'Nama PC', 'Chipset', 'Departemen', 'Status Penempatan', 'Power Supply', 'Storage 1', 'Storage 2', 'RAM Slot 1', 'RAM Slot 2', 'RAM Slot 3', 'VGA Card']
   ];
   (state.pcs || []).forEach((pc, index) => {
     const psu = state.masterItems.find(i => i.id === pc.psu_item_id)?.item_name || '-';
-    const storage = state.masterItems.find(i => i.id === pc.storage_item_id)?.item_name || '-';
+    const storage1 = state.masterItems.find(i => i.id === pc.storage_item_id)?.item_name || '-';
+    const storage2 = state.masterItems.find(i => i.id === pc.storage2_item_id)?.item_name || '-';
     const ram1 = state.masterItems.find(i => i.id === pc.ram1_item_id)?.item_name || '-';
     const ram2 = state.masterItems.find(i => i.id === pc.ram2_item_id)?.item_name || '-';
     const ram3 = state.masterItems.find(i => i.id === pc.ram3_item_id)?.item_name || '-';
     const vga = state.masterItems.find(i => i.id === pc.vga_item_id)?.item_name || '-';
-    pcSummaryData.push([index + 1, pc.name, pc.chipset, pc.department ? `Terpasang di ${pc.department}` : 'Ready in IT Storage', psu, storage, ram1, ram2, ram3, vga]);
+    const deptLabel = pc.department && String(pc.department).trim() !== '' ? String(pc.department).trim() : '- belum terpasang';
+    const statusLabel = pc.department ? `Terpasang di ${deptLabel}` : 'Ready in IT Storage (- belum terpasang)';
+    pcSummaryData.push([index + 1, pc.name, pc.chipset, deptLabel, statusLabel, psu, storage1, storage2, ram1, ram2, ram3, vga]);
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pcSummaryData), 'PC Workstations');
 
   const filename = `Hotel_IT_Master_Full_Backup_${new Date().toISOString().split('T')[0]}.xlsx`;
   XLSX.writeFile(wb, filename);
   showToast(`Full Master Backup file "${filename}" berhasil didownload!`, 'success');
+}
+
+function exportPCManagementExcel() {
+  const XLSX = getSheetJS();
+  if (!XLSX) return;
+
+  const wb = XLSX.utils.book_new();
+  const pcsList = [...(state.pcs || [])].sort((a, b) => {
+    const deptA = a.department ? a.department.toLowerCase() : 'zzzz_- belum terpasang';
+    const deptB = b.department ? b.department.toLowerCase() : 'zzzz_- belum terpasang';
+    if (deptA !== deptB) return deptA.localeCompare(deptB);
+    return (a.name || '').localeCompare(b.name || '');
+  });
+
+  const data = [
+    ['RATTAN-INN HOTEL IT - PC MANAGEMENT & HARDWARE COMPONENTS REPORT'],
+    [`Generated (Device Real-Time Clock): ${getClientDeviceTimestamp()}`],
+    [],
+    ['No', 'Nama PC', 'Chipset / Platform', 'Departemen', 'Status Penempatan', 'Power Supply (PSU)', 'Storage 1 (HDD/SSD)', 'Storage 2 (Opsional)', 'RAM Slot 1', 'RAM Slot 2', 'RAM Slot 3', 'VGA Card', 'Dibuat Oleh', 'Tanggal Rakit']
+  ];
+
+  const getItemName = (id) => (id ? (state.masterItems.find(i => i.id === id)?.item_name || '-') : '-');
+
+  pcsList.forEach((pc, idx) => {
+    const hasDept = Boolean(pc.department && String(pc.department).trim() !== '');
+    const deptLabel = hasDept ? String(pc.department).trim() : '- belum terpasang';
+    const statusLabel = hasDept ? `Terpasang di ${deptLabel}` : 'Ready in IT Storage (- belum terpasang)';
+
+    data.push([
+      idx + 1,
+      pc.name || '-',
+      pc.chipset || '-',
+      deptLabel,
+      statusLabel,
+      getItemName(pc.psu_item_id),
+      getItemName(pc.storage_item_id),
+      getItemName(pc.storage2_item_id),
+      getItemName(pc.ram1_item_id),
+      getItemName(pc.ram2_item_id),
+      getItemName(pc.ram3_item_id),
+      getItemName(pc.vga_item_id),
+      pc.created_by || '-',
+      pc.created_at || '-'
+    ]);
+  });
+
+  const wsMain = XLSX.utils.aoa_to_sheet(data);
+  wsMain['!cols'] = [
+    { wch: 6 }, { wch: 20 }, { wch: 18 }, { wch: 22 }, { wch: 32 },
+    { wch: 26 }, { wch: 26 }, { wch: 26 }, { wch: 24 }, { wch: 24 },
+    { wch: 24 }, { wch: 24 }, { wch: 24 }, { wch: 20 }
+  ];
+  XLSX.utils.book_append_sheet(wb, wsMain, 'PC Management');
+
+  // Sheet 2: Rekap per Departemen
+  const deptSummary = [
+    ['REKAP DISTRIBUSI PC PER DEPARTEMEN HOTEL'],
+    [],
+    ['No', 'Departemen', 'Jumlah PC Terpasang', 'Daftar Nama PC']
+  ];
+
+  DEPARTMENTS.forEach((dept, idx) => {
+    const pcsInDept = pcsList.filter(p => p.department === dept);
+    deptSummary.push([
+      idx + 1,
+      dept,
+      pcsInDept.length,
+      pcsInDept.length > 0 ? pcsInDept.map(p => p.name).join(', ') : '-'
+    ]);
+  });
+
+  const unassignedPCs = pcsList.filter(p => !p.department || String(p.department).trim() === '');
+  deptSummary.push([
+    DEPARTMENTS.length + 1,
+    '- belum terpasang',
+    unassignedPCs.length,
+    unassignedPCs.length > 0 ? unassignedPCs.map(p => p.name).join(', ') : '-'
+  ]);
+
+  const wsDept = XLSX.utils.aoa_to_sheet(deptSummary);
+  wsDept['!cols'] = [{ wch: 6 }, { wch: 24 }, { wch: 22 }, { wch: 60 }];
+  XLSX.utils.book_append_sheet(wb, wsDept, 'Rekap Per Departemen');
+
+  const now = new Date();
+  const dateStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+  const filename = `Rattan_Inn_PC_Management_${dateStr}.xlsx`;
+  XLSX.writeFile(wb, filename);
+  showToast(`File "${filename}" berhasil didownload!`, 'success');
 }
 
 // ==============================================================================
@@ -4004,10 +4518,11 @@ CREATE POLICY "Private Notes Delete Policy" ON public.private_notes
   );
 
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.shared_notes; EXCEPTION WHEN OTHERS THEN NULL; END $$;
-DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.private_notes; EXCEPTION WHEN OTHERS THEN NULL; END $$;`;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE public.private_notes; EXCEPTION WHEN OTHERS THEN NULL; END $$;
+ALTER TABLE public.pcs ADD COLUMN IF NOT EXISTS storage2_item_id TEXT REFERENCES public.master_items(id) ON DELETE SET NULL;`;
 
   navigator.clipboard.writeText(sql).then(() => {
-    showToast('SQL Schema (Note Bersama, Note Pribadi RLS & Storage note-images) berhasil disalin!', 'success');
+    showToast('SQL Schema (Note Bersama, Note Pribadi RLS, Storage note-images & PC Storage 2) berhasil disalin!', 'success');
   }).catch(() => {
     showToast('Gagal menyalin, periksa izin clipboard.', 'error');
   });
@@ -4134,7 +4649,7 @@ function renderPCManagement() {
       (pcFilter === 'IN_DEPT' && !!pc.department) ||
       (pcFilter === 'READY' && !pc.department);
 
-    const nameMatch = pc.name.toLowerCase().includes(search);
+    const nameMatch = (pc.name || '').toLowerCase().includes(search);
     const chipsetMatch = (pc.chipset || '').toLowerCase().includes(search);
     const deptMatch = (pc.department || '').toLowerCase().includes(search);
 
@@ -4153,6 +4668,7 @@ function renderPCManagement() {
     const isAssigned = !!pc.department;
     const psuItem = state.masterItems.find(i => i.id === pc.psu_item_id);
     const storageItem = state.masterItems.find(i => i.id === pc.storage_item_id);
+    const storage2Item = state.masterItems.find(i => i.id === pc.storage2_item_id);
     const ram1Item = state.masterItems.find(i => i.id === pc.ram1_item_id);
     const ram2Item = state.masterItems.find(i => i.id === pc.ram2_item_id);
     const ram3Item = state.masterItems.find(i => i.id === pc.ram3_item_id);
@@ -4173,7 +4689,7 @@ function renderPCManagement() {
                 <i class="fa-solid fa-desktop text-base"></i>
               </div>
               <div class="min-w-0">
-                <h4 class="text-base font-black text-white truncate tracking-tight">${escapeHtml(pc.name)}</h4>
+                <h4 class="text-base font-black text-white truncate">${escapeHtml(pc.name)}</h4>
                 <div class="text-[11px] text-indigo-300 font-mono truncate flex items-center gap-1.5 mt-0.5">
                   <span class="w-1.5 h-1.5 rounded-full ${isAssigned ? 'bg-amber-400' : 'bg-emerald-400'} animate-pulse"></span>
                   <span>${escapeHtml(pc.chipset || '-')}</span>
@@ -4197,10 +4713,11 @@ function renderPCManagement() {
             `}
           </div>
 
-          <!-- 6 Hardware Slots Mini Summary -->
+          <!-- 7 Hardware Slots Mini Summary -->
           <div class="mt-4 grid grid-cols-2 gap-1.5 text-[10px]">
             ${renderSlotMiniChip('PSU', psuItem, 'fa-bolt')}
-            ${renderSlotMiniChip('Storage', storageItem, 'fa-hard-drive')}
+            ${renderSlotMiniChip('Storage 1', storageItem, 'fa-hard-drive')}
+            ${renderSlotMiniChip('Storage 2', storage2Item, 'fa-hard-drive')}
             ${renderSlotMiniChip('RAM 1', ram1Item, 'fa-memory')}
             ${renderSlotMiniChip('RAM 2', ram2Item, 'fa-memory')}
             ${renderSlotMiniChip('RAM 3', ram3Item, 'fa-memory')}
@@ -4254,48 +4771,452 @@ function renderPCManagement() {
   }).join('');
 }
 
-function populateAddPCComponentDropdowns() {
-  const pcItems = state.masterItems.filter(i => i.category === 'PC ITEMS');
+const MB_SLOT_META = [
+  { key: 'psu_item_id', label: 'ATX 24-Pin · Power Supply', shortLabel: 'Power Supply', slotName: 'Power Supply', required: true, accent: 'amber', icon: 'fa-bolt' },
+  { key: 'ram1_item_id', label: 'DIMM A1 · RAM Slot 1', shortLabel: 'RAM Slot 1', slotName: 'RAM Slot 1', required: true, accent: 'indigo', icon: 'fa-memory' },
+  { key: 'ram2_item_id', label: 'DIMM A2 · RAM Slot 2', shortLabel: 'RAM Slot 2', slotName: 'RAM Slot 2', required: false, accent: 'indigo', icon: 'fa-memory' },
+  { key: 'ram3_item_id', label: 'DIMM B1 · RAM Slot 3', shortLabel: 'RAM Slot 3', slotName: 'RAM Slot 3', required: false, accent: 'indigo', icon: 'fa-memory' },
+  { key: 'storage_item_id', label: 'M.2_1 · Storage 1', shortLabel: 'Storage 1', slotName: 'Hardisk / SSD 1', required: true, accent: 'cyan', icon: 'fa-hard-drive' },
+  { key: 'storage2_item_id', label: 'M.2_2 · Storage 2', shortLabel: 'Storage 2', slotName: 'Hardisk / SSD 2 (Storage 2)', required: false, accent: 'cyan', icon: 'fa-hard-drive' },
+  { key: 'vga_item_id', label: 'PCIe x16 · VGA Card', shortLabel: 'VGA Card', slotName: 'VGA Card', required: false, accent: 'emerald', icon: 'fa-display' }
+];
 
-  const buildOptions = (isRequired = false, defaultEmptyLabel = '-- Kosong / Tidak Terpasang --') => {
-    let html = '';
-    if (!isRequired) {
-      html += `<option value="">${defaultEmptyLabel}</option>`;
-    } else {
-      html += `<option value="" disabled selected>-- Pilih Komponen dari PC ITEMS --</option>`;
+function syncMotherboardPreviewHeader() {
+  const pcName = (document.getElementById('add-pc-name')?.value || '').trim();
+  const chipset = (document.getElementById('add-pc-chipset')?.value || '').trim();
+  const previewNameEl = document.getElementById('mb-preview-pc-name');
+  const previewChipsetEl = document.getElementById('mb-preview-chipset');
+  const heatsinkLabelEl = document.getElementById('mb-heatsink-label');
+
+  if (previewNameEl) previewNameEl.textContent = pcName || 'Workstation Baru';
+  if (previewChipsetEl) previewChipsetEl.textContent = chipset || 'Chipset belum diisi';
+  if (heatsinkLabelEl) heatsinkLabelEl.textContent = chipset ? `${chipset} Core` : 'CPU & Chipset Core';
+}
+
+function populateAddPCComponentDropdowns(searchKeyword = addPCComponentSearchQuery) {
+  const allPcItems = (state.masterItems || []).filter(i => i.category === 'PC ITEMS');
+  const kw = (searchKeyword || '').toLowerCase().trim();
+  const filteredPcItems = kw
+    ? allPcItems.filter(item =>
+        (item.item_name || '').toLowerCase().includes(kw) ||
+        (item.item_code || '').toLowerCase().includes(kw) ||
+        (item.remark || '').toLowerCase().includes(kw)
+      )
+    : allPcItems;
+
+  const hintEl = document.getElementById('add-pc-comp-search-hint');
+  if (hintEl) {
+    hintEl.textContent = kw
+      ? `Menampilkan ${filteredPcItems.length} dari ${allPcItems.length} komponen PC ITEMS untuk "${searchKeyword.trim()}".`
+      : `Menampilkan ${allPcItems.length} komponen PC ITEMS · pilih untuk masuk wadah (-1 stok).`;
+  }
+
+  const picker = document.getElementById('add-pc-comp-picker');
+  if (!picker) return;
+
+  let html = '<option value="">-- Klik &amp; Pilih Komponen Masuk Wadah --</option>';
+  filteredPcItems.forEach(item => {
+    const metrics = calculateStockMetrics(item.id);
+    const isAvailable = metrics.availableStock > 0;
+    const stockBadge = isAvailable ? `(Sisa Stok: ${metrics.availableStock} unit)` : '(Habis / Out of stock)';
+    const disabledAttr = isAvailable ? '' : 'disabled class="text-slate-600 bg-slate-950"';
+    html += `<option value="${item.id}" ${disabledAttr}>${escapeHtml(item.item_name)} ${stockBadge}</option>`;
+  });
+
+  picker.innerHTML = html;
+  picker.value = '';
+}
+
+function filterAddPCComponents(keyword) {
+  addPCComponentSearchQuery = keyword || '';
+  populateAddPCComponentDropdowns(addPCComponentSearchQuery);
+}
+
+function refreshLiveAssemblyStockViews() {
+  populateAddPCComponentDropdowns(addPCComponentSearchQuery);
+  renderInventoryTable();
+  updateHeaderCounters();
+  renderDashboard();
+}
+
+function handleAddPCComponentPick(itemId) {
+  const picker = document.getElementById('add-pc-comp-picker');
+  if (!itemId) return;
+
+  const item = (state.masterItems || []).find(i => i.id === itemId);
+  if (!item) {
+    if (picker) picker.value = '';
+    return;
+  }
+
+  const { availableStock } = calculateStockMetrics(itemId);
+  if (availableStock <= 0) {
+    showToast(`Stok "${item.item_name}" sedang habis.`, 'warning');
+    if (picker) picker.value = '';
+    return;
+  }
+
+  const trayId = `tray-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  pcAssemblyState.tray.push({ trayId, itemId });
+  selectedTrayItemIdForClickAssign = trayId;
+
+  if (picker) picker.value = '';
+  renderAddPCAssemblyUI();
+  refreshLiveAssemblyStockViews();
+}
+
+function removeTrayItemFromAssembly(trayId) {
+  const idx = pcAssemblyState.tray.findIndex(t => t.trayId === trayId);
+  if (idx === -1) return;
+  pcAssemblyState.tray.splice(idx, 1);
+  if (selectedTrayItemIdForClickAssign === trayId) {
+    selectedTrayItemIdForClickAssign = null;
+  }
+  renderAddPCAssemblyUI();
+  refreshLiveAssemblyStockViews();
+}
+
+function clearAddPCAssemblyTray() {
+  if (pcAssemblyState.tray.length === 0) return;
+  pcAssemblyState.tray = [];
+  selectedTrayItemIdForClickAssign = null;
+  renderAddPCAssemblyUI();
+  refreshLiveAssemblyStockViews();
+}
+
+function selectTrayItemForClickAssign(trayId) {
+  selectedTrayItemIdForClickAssign = selectedTrayItemIdForClickAssign === trayId ? null : trayId;
+  renderAddPCAssemblyUI();
+}
+
+function handleTrayItemDragStart(event, trayId) {
+  draggedAssemblyPayload = { source: 'tray', trayId };
+  if (event && event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', JSON.stringify(draggedAssemblyPayload));
+  }
+}
+
+function handleSlotDragStart(event, slotKey) {
+  if (!pcAssemblyState.slots[slotKey]) return;
+  draggedAssemblyPayload = { source: 'slot', slotKey };
+  if (event && event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', JSON.stringify(draggedAssemblyPayload));
+  }
+}
+
+function handleSlotDragOver(event, slotKey) {
+  if (event) event.preventDefault();
+  const wrapper = document.getElementById(`mb-slot-${slotKey}`);
+  const dropEl = wrapper?.querySelector('[data-mb-dropzone]');
+  if (dropEl) {
+    dropEl.classList.add('ring-2', 'ring-cyan-400', 'bg-cyan-500/15');
+  }
+}
+
+function handleSlotDragLeave(event, slotKey) {
+  const wrapper = document.getElementById(`mb-slot-${slotKey}`);
+  const dropEl = wrapper?.querySelector('[data-mb-dropzone]');
+  if (dropEl) {
+    dropEl.classList.remove('ring-2', 'ring-cyan-400', 'bg-cyan-500/15');
+  }
+}
+
+function parseAssemblyDragPayload(event) {
+  if (draggedAssemblyPayload) return draggedAssemblyPayload;
+  try {
+    const raw = event?.dataTransfer?.getData('text/plain');
+    if (raw) return JSON.parse(raw);
+  } catch (err) {
+    return null;
+  }
+  return null;
+}
+
+function handleDropOnMotherboardSlot(event, slotKey) {
+  if (event) event.preventDefault();
+  handleSlotDragLeave(event, slotKey);
+  const payload = parseAssemblyDragPayload(event);
+  draggedAssemblyPayload = null;
+  if (!payload) return;
+
+  if (payload.source === 'tray' && payload.trayId) {
+    const idx = pcAssemblyState.tray.findIndex(t => t.trayId === payload.trayId);
+    if (idx === -1) return;
+    const [picked] = pcAssemblyState.tray.splice(idx, 1);
+    const existingItemId = pcAssemblyState.slots[slotKey];
+    if (existingItemId) {
+      pcAssemblyState.tray.push({
+        trayId: `tray-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        itemId: existingItemId
+      });
     }
+    pcAssemblyState.slots[slotKey] = picked.itemId;
+    if (selectedTrayItemIdForClickAssign === payload.trayId) {
+      selectedTrayItemIdForClickAssign = null;
+    }
+    renderAddPCAssemblyUI();
+  } else if (payload.source === 'slot' && payload.slotKey && payload.slotKey !== slotKey) {
+    const fromItemId = pcAssemblyState.slots[payload.slotKey];
+    if (!fromItemId) return;
+    const targetItemId = pcAssemblyState.slots[slotKey];
+    pcAssemblyState.slots[slotKey] = fromItemId;
+    pcAssemblyState.slots[payload.slotKey] = targetItemId || null;
+    renderAddPCAssemblyUI();
+  }
+}
 
-    pcItems.forEach(item => {
-      const metrics = calculateStockMetrics(item.id);
-      const isAvailable = metrics.availableStock > 0;
-      const stockBadge = isAvailable ? `(Sisa Stok: ${metrics.availableStock} unit)` : '(Habis / Out of stock)';
-      const disabledAttr = isAvailable ? '' : 'disabled class="text-slate-600 bg-slate-950"';
-      html += `<option value="${item.id}" ${disabledAttr}>${escapeHtml(item.item_name)} ${stockBadge}</option>`;
+function handleTrayDragOver(event) {
+  if (event) event.preventDefault();
+  const trayEl = document.getElementById('add-pc-tray-list');
+  if (trayEl) trayEl.classList.add('border-cyan-400', 'bg-cyan-950/20');
+}
+
+function handleDropToTray(event) {
+  if (event) event.preventDefault();
+  const trayEl = document.getElementById('add-pc-tray-list');
+  if (trayEl) trayEl.classList.remove('border-cyan-400', 'bg-cyan-950/20');
+  const payload = parseAssemblyDragPayload(event);
+  draggedAssemblyPayload = null;
+  if (!payload) return;
+
+  if (payload.source === 'slot' && payload.slotKey) {
+    unassignMotherboardSlot(payload.slotKey);
+  }
+}
+
+function handleMotherboardSlotClick(slotKey) {
+  if (!selectedTrayItemIdForClickAssign) return;
+  const idx = pcAssemblyState.tray.findIndex(t => t.trayId === selectedTrayItemIdForClickAssign);
+  if (idx === -1) {
+    selectedTrayItemIdForClickAssign = null;
+    renderAddPCAssemblyUI();
+    return;
+  }
+  const [picked] = pcAssemblyState.tray.splice(idx, 1);
+  const existingItemId = pcAssemblyState.slots[slotKey];
+  if (existingItemId) {
+    pcAssemblyState.tray.push({
+      trayId: `tray-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      itemId: existingItemId
     });
+  }
+  pcAssemblyState.slots[slotKey] = picked.itemId;
+  selectedTrayItemIdForClickAssign = null;
+  renderAddPCAssemblyUI();
+}
 
-    return html;
+function unassignMotherboardSlot(slotKey, event) {
+  if (event) event.stopPropagation();
+  const itemId = pcAssemblyState.slots[slotKey];
+  if (!itemId) return;
+  pcAssemblyState.slots[slotKey] = null;
+  const trayId = `tray-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  pcAssemblyState.tray.push({ trayId, itemId });
+  renderAddPCAssemblyUI();
+}
+
+function renderAddPCAssemblyUI() {
+  const trayListEl = document.getElementById('add-pc-tray-list');
+  const trayCountEl = document.getElementById('add-pc-tray-count');
+  const clearBtnEl = document.getElementById('btn-clear-pc-tray');
+  const progressEl = document.getElementById('mb-slots-progress');
+
+  if (trayCountEl) {
+    trayCountEl.textContent = `${pcAssemblyState.tray.length} item`;
+  }
+  if (clearBtnEl) {
+    if (pcAssemblyState.tray.length > 0) {
+      clearBtnEl.classList.remove('hidden');
+    } else {
+      clearBtnEl.classList.add('hidden');
+    }
+  }
+
+  if (trayListEl) {
+    if (pcAssemblyState.tray.length === 0) {
+      trayListEl.innerHTML = `
+        <div class="h-full min-h-[125px] flex flex-col items-center justify-center text-center px-3 py-4 text-slate-500">
+          <i class="fa-solid fa-microchip text-2xl mb-1.5 text-slate-600"></i>
+          <p class="text-[11px] font-semibold text-slate-400">Wadah masih kosong</p>
+          <p class="text-[10px] text-slate-500 mt-0.5">Pilih komponen di dropdown atas untuk memasukkannya ke wadah.</p>
+        </div>
+      `;
+    } else {
+      trayListEl.innerHTML = pcAssemblyState.tray.map(trayEntry => {
+        const item = (state.masterItems || []).find(i => i.id === trayEntry.itemId);
+        const itemName = item ? item.item_name : 'Komponen PC';
+        const itemCode = item?.item_code || 'PC-PART';
+        const isSelected = selectedTrayItemIdForClickAssign === trayEntry.trayId;
+        const thumb = item?.photo_url
+          ? `<img src="${item.photo_url}" alt="${escapeHtml(itemName)}" class="w-8 h-8 rounded-lg object-cover border border-slate-700 shrink-0">`
+          : `<div class="w-8 h-8 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300 shrink-0"><i class="fa-solid fa-microchip text-xs"></i></div>`;
+
+        return `
+          <div
+            draggable="true"
+            ondragstart="handleTrayItemDragStart(event, '${trayEntry.trayId}')"
+            data-tray-id="${trayEntry.trayId}"
+            class="group flex items-center justify-between gap-2 p-2 rounded-xl border ${isSelected ? 'border-cyan-400 bg-cyan-950/40 ring-1 ring-cyan-400/60' : 'border-slate-700/90 bg-slate-900/90 hover:border-indigo-400/60'} cursor-grab active:cursor-grabbing transition"
+          >
+            <button
+              type="button"
+              onclick="selectTrayItemForClickAssign('${trayEntry.trayId}')"
+              aria-label="Pilih ${escapeHtml(itemName)} untuk dipasang ke slot Motherboard"
+              class="flex items-center gap-2.5 min-w-0 flex-1 text-left"
+            >
+              <i class="fa-solid fa-grip-vertical text-slate-500 text-xs shrink-0"></i>
+              ${thumb}
+              <div class="min-w-0 flex-1">
+                <div class="text-xs font-bold text-white truncate">${escapeHtml(itemName)}</div>
+                <div class="text-[10px] font-mono ${isSelected ? 'text-cyan-300' : 'text-slate-400'} truncate">
+                  ${escapeHtml(itemCode)} · ${isSelected ? 'Klik slot Motherboard untuk pasang' : 'Drag atau klik'}
+                </div>
+              </div>
+            </button>
+            <button
+              type="button"
+              onclick="event.stopPropagation(); removeTrayItemFromAssembly('${trayEntry.trayId}')"
+              aria-label="Keluarkan ${escapeHtml(itemName)} dari wadah ke stok"
+              title="Kembalikan 1 unit ke Inventory"
+              class="w-7 h-7 rounded-lg bg-slate-800 hover:bg-rose-600 text-slate-400 hover:text-white flex items-center justify-center text-xs transition shrink-0"
+            >
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+
+  let installedCount = 0;
+  const accentStyles = {
+    amber: { border: 'border-amber-500/45', label: 'text-amber-300', badge: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+    indigo: { border: 'border-indigo-500/45', label: 'text-indigo-300', badge: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30' },
+    cyan: { border: 'border-cyan-500/45', label: 'text-cyan-300', badge: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' },
+    emerald: { border: 'border-emerald-500/45', label: 'text-emerald-300', badge: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' }
   };
 
-  const psuSelect = document.getElementById('add-pc-psu');
-  const storageSelect = document.getElementById('add-pc-storage');
-  const ram1Select = document.getElementById('add-pc-ram1');
-  const ram2Select = document.getElementById('add-pc-ram2');
-  const ram3Select = document.getElementById('add-pc-ram3');
-  const vgaSelect = document.getElementById('add-pc-vga');
+  MB_SLOT_META.forEach(meta => {
+    const slotWrapper = document.getElementById(`mb-slot-${meta.key}`);
+    if (!slotWrapper) return;
+    const assignedItemId = pcAssemblyState.slots[meta.key];
+    const styles = accentStyles[meta.accent] || accentStyles.cyan;
+    const reqMark = meta.required ? '<span class="text-rose-400 font-bold">*</span>' : '';
 
-  if (psuSelect) psuSelect.innerHTML = buildOptions(true);
-  if (storageSelect) storageSelect.innerHTML = buildOptions(true);
-  if (ram1Select) ram1Select.innerHTML = buildOptions(true);
-  if (ram2Select) ram2Select.innerHTML = buildOptions(false, '-- Kosong / Tidak Terpasang --');
-  if (ram3Select) ram3Select.innerHTML = buildOptions(false, '-- Kosong / Tidak Terpasang --');
-  if (vgaSelect) vgaSelect.innerHTML = buildOptions(false, '-- Kosong / Integrated Graphics (Onboard) --');
+    if (assignedItemId) {
+      installedCount += 1;
+      const item = (state.masterItems || []).find(i => i.id === assignedItemId);
+      const itemName = item ? item.item_name : 'Komponen Terpasang';
+      const itemCode = item?.item_code || 'INSTALLED';
+      slotWrapper.innerHTML = `
+        <div
+          data-mb-dropzone="${meta.key}"
+          draggable="true"
+          ondragstart="handleSlotDragStart(event, '${meta.key}')"
+          ondragover="handleSlotDragOver(event, '${meta.key}')"
+          ondragleave="handleSlotDragLeave(event, '${meta.key}')"
+          ondrop="handleDropOnMotherboardSlot(event, '${meta.key}')"
+          onclick="handleMotherboardSlotClick('${meta.key}')"
+          class="h-full p-2.5 rounded-xl bg-slate-900/95 border ${styles.border} shadow-md flex flex-col justify-between gap-2 cursor-grab active:cursor-grabbing transition"
+        >
+          <div class="flex items-center justify-between gap-1.5">
+            <span class="text-[10px] font-mono font-bold ${styles.label} truncate">${meta.label} ${reqMark}</span>
+            <button
+              type="button"
+              onclick="unassignMotherboardSlot('${meta.key}', event)"
+              aria-label="Lepas komponen dari ${meta.shortLabel}"
+              title="Lepas kembali ke wadah"
+              class="w-5 h-5 rounded bg-slate-800 hover:bg-rose-600 text-slate-300 hover:text-white flex items-center justify-center text-[10px] transition shrink-0"
+            >
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+          <div class="flex items-center gap-2 min-w-0">
+            <div class="w-6 h-6 rounded-md ${styles.badge} border flex items-center justify-center text-[10px] shrink-0">
+              <i class="fa-solid ${meta.icon}"></i>
+            </div>
+            <div class="min-w-0">
+              <div class="text-[11px] font-bold text-white truncate">${escapeHtml(itemName)}</div>
+              <div class="text-[9px] font-mono text-emerald-400 truncate">${escapeHtml(itemCode)} · Terpasang</div>
+            </div>
+          </div>
+        </div>
+      `;
+    } else {
+      const clickReadyClass = selectedTrayItemIdForClickAssign
+        ? 'border-cyan-400/80 bg-cyan-950/30 hover:bg-cyan-900/40 cursor-pointer ring-1 ring-cyan-400/40'
+        : 'border-slate-700/90 bg-slate-900/55 hover:border-slate-500';
+      const emptyActionHtml = selectedTrayItemIdForClickAssign
+        ? `<span class="text-[10px] font-semibold text-cyan-300">Klik di sini untuk pasang</span>`
+        : `<span class="text-[10px] text-slate-500">Drop komponen ke slot ini</span>`;
+
+      const isDimmSlot = meta.key.startsWith('ram');
+      const minHeightClass = isDimmSlot ? 'min-h-[54px] p-2' : 'min-h-[68px] p-2.5';
+
+      slotWrapper.innerHTML = `
+        <button
+          type="button"
+          data-mb-dropzone="${meta.key}"
+          ondragover="handleSlotDragOver(event, '${meta.key}')"
+          ondragleave="handleSlotDragLeave(event, '${meta.key}')"
+          ondrop="handleDropOnMotherboardSlot(event, '${meta.key}')"
+          onclick="handleMotherboardSlotClick('${meta.key}')"
+          aria-label="Slot ${meta.shortLabel} ${meta.required ? 'wajib' : 'opsional'}"
+          class="w-full h-full ${minHeightClass} rounded-xl border border-dashed ${clickReadyClass} text-left flex flex-col justify-between gap-1 transition"
+        >
+          <div class="flex items-center justify-between gap-1.5 w-full">
+            <span class="text-[10px] font-mono font-bold ${styles.label} truncate">${meta.label} ${reqMark}</span>
+            <i class="fa-solid ${meta.icon} text-[10px] text-slate-500 shrink-0"></i>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="w-1.5 h-1.5 rounded-full ${meta.required ? 'bg-rose-400/80' : 'bg-slate-600'}"></span>
+            ${emptyActionHtml}
+          </div>
+        </button>
+      `;
+    }
+  });
+
+  if (progressEl) {
+    progressEl.textContent = `${installedCount}/7 terpasang`;
+  }
 }
 
 function openModalAddPC() {
   const form = document.getElementById('form-add-pc');
   if (form) form.reset();
-  populateAddPCComponentDropdowns();
+  addPCComponentSearchQuery = '';
+  const searchEl = document.getElementById('add-pc-comp-search');
+  if (searchEl) searchEl.value = '';
+
+  pcAssemblyState = {
+    active: true,
+    tray: [],
+    slots: {
+      psu_item_id: null,
+      storage_item_id: null,
+      storage2_item_id: null,
+      ram1_item_id: null,
+      ram2_item_id: null,
+      ram3_item_id: null,
+      vga_item_id: null
+    }
+  };
+  selectedTrayItemIdForClickAssign = null;
+  draggedAssemblyPayload = null;
+
+  syncMotherboardPreviewHeader();
+  populateAddPCComponentDropdowns('');
+  renderAddPCAssemblyUI();
   openModal('modal-add-pc');
+}
+
+function cancelAndCloseAddPCModal() {
+  resetPCAssemblyState();
+  closeModal('modal-add-pc');
+  refreshAllViews();
 }
 
 async function handleCreatePCSubmit(e) {
@@ -4303,21 +5224,16 @@ async function handleCreatePCSubmit(e) {
 
   const nameInput = document.getElementById('add-pc-name');
   const chipsetInput = document.getElementById('add-pc-chipset');
-  const psuSelect = document.getElementById('add-pc-psu');
-  const storageSelect = document.getElementById('add-pc-storage');
-  const ram1Select = document.getElementById('add-pc-ram1');
-  const ram2Select = document.getElementById('add-pc-ram2');
-  const ram3Select = document.getElementById('add-pc-ram3');
-  const vgaSelect = document.getElementById('add-pc-vga');
 
   const pcName = (nameInput?.value || '').trim();
   const chipset = (chipsetInput?.value || '').trim();
-  const psuId = psuSelect?.value;
-  const storageId = storageSelect?.value;
-  const ram1Id = ram1Select?.value;
-  const ram2Id = ram2Select?.value || null;
-  const ram3Id = ram3Select?.value || null;
-  const vgaId = vgaSelect?.value || null;
+  const psuId = pcAssemblyState.slots.psu_item_id || null;
+  const storageId = pcAssemblyState.slots.storage_item_id || null;
+  const storage2Id = pcAssemblyState.slots.storage2_item_id || null;
+  const ram1Id = pcAssemblyState.slots.ram1_item_id || null;
+  const ram2Id = pcAssemblyState.slots.ram2_item_id || null;
+  const ram3Id = pcAssemblyState.slots.ram3_item_id || null;
+  const vgaId = pcAssemblyState.slots.vga_item_id || null;
 
   if (!pcName) {
     showToast('Nama PC wajib diisi.', 'error');
@@ -4337,21 +5253,21 @@ async function handleCreatePCSubmit(e) {
   }
 
   if (!psuId || !storageId || !ram1Id) {
-    showToast('Komponen Power Supply, Hardisk/SSD, dan RAM Slot 1 wajib dipilih dari stok inventory.', 'error');
+    showToast('Slot Power Supply, Storage 1, dan RAM Slot 1 wajib terpasang di Motherboard.', 'error');
     return;
   }
 
-  // Verify stock availability
+  // Verify stock availability (including items currently reserved inside the assembly workbench)
   const selectedComps = [
     { slot: 'Power Supply', id: psuId },
-    { slot: 'Hardisk / SSD', id: storageId },
+    { slot: 'Hardisk / SSD 1', id: storageId },
     { slot: 'RAM Slot 1', id: ram1Id }
   ];
+  if (storage2Id) selectedComps.push({ slot: 'Hardisk / SSD 2 (Storage 2)', id: storage2Id });
   if (ram2Id) selectedComps.push({ slot: 'RAM Slot 2', id: ram2Id });
   if (ram3Id) selectedComps.push({ slot: 'RAM Slot 3', id: ram3Id });
   if (vgaId) selectedComps.push({ slot: 'VGA Card', id: vgaId });
 
-  // Count items used to ensure enough available stock
   const itemUsageMap = {};
   for (const comp of selectedComps) {
     itemUsageMap[comp.id] = (itemUsageMap[comp.id] || 0) + 1;
@@ -4359,12 +5275,17 @@ async function handleCreatePCSubmit(e) {
 
   for (const [itemId, neededQty] of Object.entries(itemUsageMap)) {
     const metrics = calculateStockMetrics(itemId);
+    const rawAvailable = metrics.availableStock + getAssemblyReservedCount(itemId);
     const itemObj = state.masterItems.find(i => i.id === itemId);
-    if (metrics.availableStock < neededQty) {
-      showToast(`Stok untuk "${itemObj?.item_name || 'Komponen'}" tidak mencukupi (Tersedia: ${metrics.availableStock}, Dibutuhkan: ${neededQty}).`, 'error');
+    if (rawAvailable < neededQty) {
+      showToast(`Stok untuk "${itemObj?.item_name || 'Komponen'}" tidak mencukupi (Tersedia: ${rawAvailable}, Dibutuhkan: ${neededQty}).`, 'error');
       return;
     }
   }
+
+  const unusedTrayCount = pcAssemblyState.tray.length;
+  // Deactivate live reservation BEFORE writing permanent TRANSFER TO PC rows
+  resetPCAssemblyState();
 
   const deviceTimestamp = getClientDeviceTimestamp();
   const currentDate = deviceTimestamp.split(' ')[0];
@@ -4378,6 +5299,7 @@ async function handleCreatePCSubmit(e) {
     status: 'Ready in IT Storage',
     psu_item_id: psuId,
     storage_item_id: storageId,
+    storage2_item_id: storage2Id,
     ram1_item_id: ram1Id,
     ram2_item_id: ram2Id,
     ram3_item_id: ram3Id,
@@ -4398,17 +5320,15 @@ async function handleCreatePCSubmit(e) {
     from_location: 'IT Storage',
     to_location: 'Ready in IT Storage',
     actor: actor,
-    notes: 'Rakit PC baru dengan alokasi komponen awal'
+    notes: 'Rakit PC baru via Motherboard Drag & Drop Workbench'
   };
   state.pcMovements.unshift(pcm);
 
-  // Deduct inventory stock for each component by logging 'TRANSFER TO PC' in departmentMovements
-  // and record in pcComponentMovements
+  // Deduct inventory stock for each installed component by logging 'TRANSFER TO PC'
   for (const comp of selectedComps) {
     const itemObj = state.masterItems.find(i => i.id === comp.id);
     const itemName = itemObj ? itemObj.item_name : 'Hardware Component';
 
-    // Motion analytics record (Department: -, QTY: 1, Pic: -, Remark: -)
     const mov = {
       id: `mov-pc-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
       item_id: comp.id,
@@ -4421,7 +5341,6 @@ async function handleCreatePCSubmit(e) {
     };
     state.departmentMovements.unshift(mov);
 
-    // Component movement log
     const compMov = {
       id: `pccm-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
       timestamp: deviceTimestamp,
@@ -4444,14 +5363,21 @@ async function handleCreatePCSubmit(e) {
   }
 
   if (isLiveSupabase && supabaseClient) {
-    supabaseClient.from('pcs').insert(newPC).then(() => {});
+    supabaseClient.from('pcs').insert(newPC).then(async ({ error }) => {
+      if (error && (error.code === 'PGRST204' || error.code === '42703' || String(error.message || '').includes('storage2_item_id'))) {
+        const fallbackPC = { ...newPC };
+        delete fallbackPC.storage2_item_id;
+        await supabaseClient.from('pcs').insert(fallbackPC);
+      }
+    });
     supabaseClient.from('pc_movements').insert(pcm).then(() => {});
   }
 
   logActivity(newPC.name, 'PC ITEMS', 'Merakit workstation baru', 'WORKSTATION');
   persistState();
   closeModal('modal-add-pc');
-  showToast(`PC "${newPC.name}" berhasil dirakit dan siap digunakan!`, 'success');
+  const trayNote = unusedTrayCount > 0 ? ` (${unusedTrayCount} komponen tersisa di wadah dikembalikan ke stok)` : '';
+  showToast(`PC "${newPC.name}" berhasil dirakit dan siap digunakan!${trayNote}`, 'success');
 }
 
 function openModalPCDetail(pcId) {
@@ -4519,11 +5445,12 @@ function openModalPCDetail(pcId) {
     }
   }
 
-  // 6 Hardware Component Slots
+  // 7 Hardware Component Slots
   if (slotsGrid) {
     const slots = [
       { key: 'psu_item_id', label: 'Power Supply', icon: 'fa-bolt' },
-      { key: 'storage_item_id', label: 'Hardisk / SSD', icon: 'fa-hard-drive' },
+      { key: 'storage_item_id', label: 'Hardisk / SSD 1', icon: 'fa-hard-drive' },
+      { key: 'storage2_item_id', label: 'Hardisk / SSD 2 (Opsional)', icon: 'fa-hard-drive' },
       { key: 'ram1_item_id', label: 'RAM Slot 1', icon: 'fa-memory' },
       { key: 'ram2_item_id', label: 'RAM Slot 2', icon: 'fa-memory' },
       { key: 'ram3_item_id', label: 'RAM Slot 3', icon: 'fa-memory' },
@@ -4606,14 +5533,18 @@ function openModalPCDetail(pcId) {
 function toggleEditPCName(isEditing) {
   const viewEl = document.getElementById('pc-detail-name-view');
   const editEl = document.getElementById('pc-detail-name-edit');
-  const inputEl = document.getElementById('input-edit-pc-name');
+  const inputNameEl = document.getElementById('input-edit-pc-name');
+  const inputChipsetEl = document.getElementById('input-edit-pc-chipset');
 
   if (isEditing) {
     const pc = state.pcs.find(p => p.id === currentDetailPCId);
-    if (pc && inputEl) inputEl.value = pc.name;
+    if (pc) {
+      if (inputNameEl) inputNameEl.value = pc.name || '';
+      if (inputChipsetEl) inputChipsetEl.value = pc.chipset || '';
+    }
     viewEl?.classList.add('hidden');
     editEl?.classList.remove('hidden');
-    inputEl?.focus();
+    inputNameEl?.focus();
   } else {
     viewEl?.classList.remove('hidden');
     editEl?.classList.add('hidden');
@@ -4621,46 +5552,59 @@ function toggleEditPCName(isEditing) {
 }
 
 function saveEditedPCName() {
-  const inputEl = document.getElementById('input-edit-pc-name');
-  const newName = (inputEl?.value || '').trim();
+  const inputNameEl = document.getElementById('input-edit-pc-name');
+  const inputChipsetEl = document.getElementById('input-edit-pc-chipset');
+  const newName = (inputNameEl?.value || '').trim();
+  const newChipset = (inputChipsetEl?.value || '').trim();
+
   if (!newName) {
     showToast('Nama PC tidak boleh kosong.', 'error');
+    return;
+  }
+  if (!newChipset) {
+    showToast('Chipset / Platform PC tidak boleh kosong.', 'error');
     return;
   }
 
   const pc = state.pcs.find(p => p.id === currentDetailPCId);
   if (!pc) return;
 
-  if (pc.name.toLowerCase() !== newName.toLowerCase() && state.pcs.some(p => p.id !== pc.id && p.name.toLowerCase() === newName.toLowerCase())) {
+  if ((pc.name || '').toLowerCase() !== newName.toLowerCase() && state.pcs.some(p => p.id !== pc.id && (p.name || '').toLowerCase() === newName.toLowerCase())) {
     showToast(`Nama PC "${newName}" sudah digunakan oleh workstation lain.`, 'error');
     return;
   }
 
   const oldName = pc.name;
+  const oldChipset = pc.chipset || '-';
   pc.name = newName;
+  pc.chipset = newChipset;
+
+  const changes = [];
+  if (oldName !== newName) changes.push(`Nama: "${oldName}" -> "${newName}"`);
+  if (oldChipset !== newChipset) changes.push(`Chipset: "${oldChipset}" -> "${newChipset}"`);
 
   const pcm = {
     id: `pcm-${Date.now()}`,
     timestamp: getClientDeviceTimestamp(),
     pc_id: pc.id,
     pc_name: pc.name,
-    action_type: 'RENAME_PC',
-    from_location: oldName,
-    to_location: newName,
+    action_type: oldName !== newName ? 'RENAME_PC' : 'EDIT_PC',
+    from_location: `${oldName} (${oldChipset})`,
+    to_location: `${newName} (${newChipset})`,
     actor: currentUser ? currentUser.email : 'admin@hotel.com',
-    notes: `Nama PC diubah dari "${oldName}" menjadi "${newName}"`
+    notes: changes.length > 0 ? changes.join(' | ') : 'Perbarui informasi workstation PC'
   };
   state.pcMovements.unshift(pcm);
 
   if (isLiveSupabase && supabaseClient) {
-    supabaseClient.from('pcs').update({ name: newName }).eq('id', pc.id).then(() => {});
+    supabaseClient.from('pcs').update({ name: newName, chipset: newChipset }).eq('id', pc.id).then(() => {});
     supabaseClient.from('pc_movements').insert(pcm).then(() => {});
   }
 
-  logActivity(newName, 'PC ITEMS', `Rename PC dari ${oldName} ke ${newName}`, 'WORKSTATION');
+  logActivity(newName, 'PC ITEMS', changes.length > 0 ? `Edit PC (${changes.join(', ')})` : `Update PC ${newName}`, 'WORKSTATION');
   persistState();
   openModalPCDetail(pc.id);
-  showToast('Nama PC berhasil diperbarui!', 'success');
+  showToast('Nama PC & Chipset berhasil diperbarui!', 'success');
 }
 
 function handleAssignPCToDept(pcId, deptName) {
@@ -4764,7 +5708,8 @@ function confirmDeletePC(pcId) {
 
   const slotDefs = [
     { key: 'psu_item_id', label: 'Power Supply', icon: 'fa-bolt' },
-    { key: 'storage_item_id', label: 'Hardisk / SSD', icon: 'fa-hard-drive' },
+    { key: 'storage_item_id', label: 'Hardisk / SSD 1', icon: 'fa-hard-drive' },
+    { key: 'storage2_item_id', label: 'Hardisk / SSD 2', icon: 'fa-hard-drive' },
     { key: 'ram1_item_id', label: 'RAM Slot 1', icon: 'fa-memory' },
     { key: 'ram2_item_id', label: 'RAM Slot 2', icon: 'fa-memory' },
     { key: 'ram3_item_id', label: 'RAM Slot 3', icon: 'fa-memory' },
@@ -4833,7 +5778,8 @@ async function executeDeletePC() {
 
   const slotDefs = [
     { key: 'psu_item_id', label: 'Power Supply' },
-    { key: 'storage_item_id', label: 'Hardisk / SSD' },
+    { key: 'storage_item_id', label: 'Hardisk / SSD 1' },
+    { key: 'storage2_item_id', label: 'Hardisk / SSD 2' },
     { key: 'ram1_item_id', label: 'RAM Slot 1' },
     { key: 'ram2_item_id', label: 'RAM Slot 2' },
     { key: 'ram3_item_id', label: 'RAM Slot 3' },
@@ -4927,6 +5873,43 @@ async function executeDeletePC() {
   showToast(`PC "${pc.name}" berhasil dihapus. ${returnedCount} komponen telah otomatis kembali ke Inventory Stock!`, 'success');
 }
 
+function renderSwapTargetPCOptions(keyword = swapTargetPCSearchQuery) {
+  if (!currentActionSlot) return;
+  const { pcId, slotKey } = currentActionSlot;
+  const swapTargetSelect = document.getElementById('select-swap-target-pc');
+  if (!swapTargetSelect) return;
+
+  const kw = (keyword || '').toLowerCase().trim();
+  const otherPCs = state.pcs.filter(p => p.id !== pcId).filter(p => {
+    if (!kw) return true;
+    const targetItemId = p[slotKey];
+    const targetItem = state.masterItems.find(i => i.id === targetItemId);
+    const compLabel = targetItem ? targetItem.item_name : '(Slot Kosong)';
+    return (
+      (p.name || '').toLowerCase().includes(kw) ||
+      (p.chipset || '').toLowerCase().includes(kw) ||
+      (p.department || '').toLowerCase().includes(kw) ||
+      compLabel.toLowerCase().includes(kw)
+    );
+  });
+
+  if (otherPCs.length === 0) {
+    swapTargetSelect.innerHTML = `<option value="" disabled selected>${kw ? 'Tidak ada PC yang cocok dengan pencarian' : 'Tidak ada PC lain yang tersedia'}</option>`;
+  } else {
+    swapTargetSelect.innerHTML = otherPCs.map(p => {
+      const targetItemId = p[slotKey];
+      const targetItem = state.masterItems.find(i => i.id === targetItemId);
+      const compLabel = targetItem ? targetItem.item_name : '(Slot Kosong)';
+      return `<option value="${p.id}">${escapeHtml(p.name)} &bull; ${escapeHtml(compLabel)}</option>`;
+    }).join('');
+  }
+}
+
+function filterSwapTargetPCs(keyword) {
+  swapTargetPCSearchQuery = keyword || '';
+  renderSwapTargetPCOptions(swapTargetPCSearchQuery);
+}
+
 function openComponentActionModal(pcId, slotKey, slotLabel) {
   currentActionSlot = { pcId, slotKey, slotLabel };
   const pc = state.pcs.find(p => p.id === pcId);
@@ -4941,7 +5924,7 @@ function openComponentActionModal(pcId, slotKey, slotLabel) {
   const badgeEl = document.getElementById('comp-action-slot-badge');
   const currentPCEl = document.getElementById('comp-action-current-pc');
   const imgContainer = document.getElementById('comp-action-img-container');
-  const swapTargetSelect = document.getElementById('select-swap-target-pc');
+  const swapSearchInput = document.getElementById('swap-pc-search');
 
   if (nameEl) nameEl.textContent = item.item_name;
   if (descEl) descEl.textContent = item.remark || `Kode SKU: ${item.item_code || '-'}`;
@@ -4954,20 +5937,9 @@ function openComponentActionModal(pcId, slotKey, slotLabel) {
       : `<i class="fa-solid fa-microchip text-xl text-slate-500"></i>`;
   }
 
-  // Populate other PCs for swap
-  if (swapTargetSelect) {
-    const otherPCs = state.pcs.filter(p => p.id !== pcId);
-    if (otherPCs.length === 0) {
-      swapTargetSelect.innerHTML = `<option value="" disabled selected>Tidak ada PC lain yang tersedia</option>`;
-    } else {
-      swapTargetSelect.innerHTML = otherPCs.map(p => {
-        const targetItemId = p[slotKey];
-        const targetItem = state.masterItems.find(i => i.id === targetItemId);
-        const compLabel = targetItem ? targetItem.item_name : '(Slot Kosong)';
-        return `<option value="${p.id}">${escapeHtml(p.name)} &bull; ${compLabel}</option>`;
-      }).join('');
-    }
-  }
+  swapTargetPCSearchQuery = '';
+  if (swapSearchInput) swapSearchInput.value = '';
+  renderSwapTargetPCOptions('');
 
   openModal('modal-component-action');
 }
@@ -5033,8 +6005,12 @@ async function executeSwapComponent() {
   state.pcComponentMovements.unshift(logB);
 
   if (isLiveSupabase && supabaseClient) {
-    supabaseClient.from('pcs').update({ [slotKey]: pcA[slotKey] }).eq('id', pcA.id).then(() => {});
-    supabaseClient.from('pcs').update({ [slotKey]: pcB[slotKey] }).eq('id', pcB.id).then(() => {});
+    const updateSlotSafe = async (id, val) => {
+      const { error } = await supabaseClient.from('pcs').update({ [slotKey]: val }).eq('id', id);
+      if (error) console.warn('Swap slot update warning:', error.message);
+    };
+    updateSlotSafe(pcA.id, pcA[slotKey]);
+    updateSlotSafe(pcB.id, pcB[slotKey]);
     supabaseClient.from('pc_component_movements').insert([logA, logB]).then(() => {});
   }
 
@@ -5107,43 +6083,70 @@ async function executeReturnComponentToInventory() {
   showToast(`Komponen "${item.item_name}" berhasil dikembalikan ke Inventory Stock (Stok bertambah 1).`, 'success');
 }
 
+function renderInstallComponentOptions(keyword = installComponentSearchQuery) {
+  const selectEl = document.getElementById('select-install-component');
+  const hintEl = document.getElementById('install-comp-stock-hint');
+  if (!selectEl) return;
+
+  const kw = (keyword || '').toLowerCase().trim();
+  const pcItems = state.masterItems.filter(i => i.category === 'PC ITEMS');
+  const availableItems = pcItems
+    .filter(item => calculateStockMetrics(item.id).availableStock > 0)
+    .filter(item => {
+      if (!kw) return true;
+      return (
+        (item.item_name || '').toLowerCase().includes(kw) ||
+        (item.item_code || '').toLowerCase().includes(kw) ||
+        (item.remark || '').toLowerCase().includes(kw)
+      );
+    });
+
+  if (availableItems.length === 0) {
+    selectEl.innerHTML = `<option value="" disabled selected>${kw ? '-- Tidak ada komponen yang cocok dengan pencarian --' : '-- Tidak ada stok PC ITEMS yang tersedia di gudang IT --'}</option>`;
+    if (hintEl) hintEl.textContent = 'Stok Tersedia: 0 unit';
+    return;
+  }
+
+  const prevVal = selectEl.value;
+  selectEl.innerHTML = availableItems.map(item => {
+    const m = calculateStockMetrics(item.id);
+    return `<option value="${item.id}">${escapeHtml(item.item_name)} (Stok: ${m.availableStock} unit)</option>`;
+  }).join('');
+
+  if (prevVal && availableItems.some(i => i.id === prevVal)) {
+    selectEl.value = prevVal;
+  }
+
+  const selected = availableItems.find(i => i.id === selectEl.value) || availableItems[0];
+  const m = calculateStockMetrics(selected.id);
+  if (hintEl) hintEl.textContent = `Stok Tersedia: ${m.availableStock} unit`;
+
+  selectEl.onchange = () => {
+    const selItem = state.masterItems.find(i => i.id === selectEl.value);
+    if (selItem && hintEl) {
+      const met = calculateStockMetrics(selItem.id);
+      hintEl.textContent = `Stok Tersedia: ${met.availableStock} unit`;
+    }
+  };
+}
+
+function filterInstallComponents(keyword) {
+  installComponentSearchQuery = keyword || '';
+  renderInstallComponentOptions(installComponentSearchQuery);
+}
+
 function openModalInstallComponent(pcId, slotKey, slotLabel) {
   currentInstallTarget = { pcId, slotKey, slotLabel };
   const pc = state.pcs.find(p => p.id === pcId);
   if (!pc) return;
 
   const labelEl = document.getElementById('install-comp-target-label');
-  const selectEl = document.getElementById('select-install-component');
-  const hintEl = document.getElementById('install-comp-stock-hint');
-
+  const searchEl = document.getElementById('install-comp-search');
   if (labelEl) labelEl.textContent = `${pc.name} \u2022 ${slotLabel || slotKey}`;
 
-  const pcItems = state.masterItems.filter(i => i.category === 'PC ITEMS');
-
-  if (selectEl) {
-    const availableItems = pcItems.filter(item => calculateStockMetrics(item.id).availableStock > 0);
-    if (availableItems.length === 0) {
-      selectEl.innerHTML = `<option value="" disabled selected>-- Tidak ada stok PC ITEMS yang tersedia di gudang IT --</option>`;
-      if (hintEl) hintEl.textContent = 'Stok Tersedia: 0 unit';
-    } else {
-      selectEl.innerHTML = availableItems.map(item => {
-        const m = calculateStockMetrics(item.id);
-        return `<option value="${item.id}">${escapeHtml(item.item_name)} (Stok: ${m.availableStock} unit)</option>`;
-      }).join('');
-
-      const firstItem = availableItems[0];
-      const m = calculateStockMetrics(firstItem.id);
-      if (hintEl) hintEl.textContent = `Stok Tersedia: ${m.availableStock} unit`;
-
-      selectEl.onchange = () => {
-        const selected = state.masterItems.find(i => i.id === selectEl.value);
-        if (selected && hintEl) {
-          const met = calculateStockMetrics(selected.id);
-          hintEl.textContent = `Stok Tersedia: ${met.availableStock} unit`;
-        }
-      };
-    }
-  }
+  installComponentSearchQuery = '';
+  if (searchEl) searchEl.value = '';
+  renderInstallComponentOptions('');
 
   openModal('modal-install-component');
 }
@@ -5241,6 +6244,7 @@ function renderDepartmentWorkstations(deptName) {
   grid.innerHTML = deptPCs.map(pc => {
     const psuItem = state.masterItems.find(i => i.id === pc.psu_item_id);
     const storageItem = state.masterItems.find(i => i.id === pc.storage_item_id);
+    const storage2Item = state.masterItems.find(i => i.id === pc.storage2_item_id);
     const ram1Item = state.masterItems.find(i => i.id === pc.ram1_item_id);
     const ram2Item = state.masterItems.find(i => i.id === pc.ram2_item_id);
     const ram3Item = state.masterItems.find(i => i.id === pc.ram3_item_id);
@@ -5274,7 +6278,8 @@ function renderDepartmentWorkstations(deptName) {
 
           <div class="mt-3.5 grid grid-cols-2 gap-1.5 text-[10px]">
             ${renderSlotMiniChip('PSU', psuItem, 'fa-bolt')}
-            ${renderSlotMiniChip('Storage', storageItem, 'fa-hard-drive')}
+            ${renderSlotMiniChip('Storage 1', storageItem, 'fa-hard-drive')}
+            ${renderSlotMiniChip('Storage 2', storage2Item, 'fa-hard-drive')}
             ${renderSlotMiniChip('RAM 1', ram1Item, 'fa-memory')}
             ${renderSlotMiniChip('RAM 2', ram2Item, 'fa-memory')}
             ${renderSlotMiniChip('RAM 3', ram3Item, 'fa-memory')}
@@ -5393,6 +6398,8 @@ function formatPCActionTypeBadge(type) {
       return `<span class="badge-pill px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/10 text-purple-400 border border-purple-500/30 whitespace-nowrap"><i class="fa-solid fa-shuffle text-[9px] mr-1"></i>PINDAH DEPT</span>`;
     case 'RENAME_PC':
       return `<span class="badge-pill px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 whitespace-nowrap"><i class="fa-solid fa-pen text-[9px] mr-1"></i>RENAME PC</span>`;
+    case 'EDIT_PC':
+      return `<span class="badge-pill px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 whitespace-nowrap"><i class="fa-solid fa-microchip text-[9px] mr-1"></i>EDIT PC / CHIPSET</span>`;
     case 'HAPUS_PC':
       return `<span class="badge-pill px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-600/20 text-rose-300 border border-rose-500/40 whitespace-nowrap"><i class="fa-solid fa-trash-can text-[9px] mr-1"></i>HAPUS PC</span>`;
     default:
@@ -5559,24 +6566,29 @@ function exportPCMovementsExcel() {
     ['RATTAN-INN HOTEL IT - WORKSTATIONS PC INVENTORY LIST'],
     [`Generated (Device Real-Time Clock): ${getClientDeviceTimestamp()}`],
     [],
-    ['No', 'Nama PC', 'Chipset', 'Departemen / Status', 'Power Supply', 'Storage', 'RAM Slot 1', 'RAM Slot 2', 'RAM Slot 3', 'VGA Card']
+    ['No', 'Nama PC', 'Chipset', 'Departemen', 'Status Penempatan', 'Power Supply', 'Storage 1', 'Storage 2', 'RAM Slot 1', 'RAM Slot 2', 'RAM Slot 3', 'VGA Card']
   ];
 
   (state.pcs || []).forEach((pc, idx) => {
     const psu = state.masterItems.find(i => i.id === pc.psu_item_id)?.item_name || '-';
-    const storage = state.masterItems.find(i => i.id === pc.storage_item_id)?.item_name || '-';
+    const storage1 = state.masterItems.find(i => i.id === pc.storage_item_id)?.item_name || '-';
+    const storage2 = state.masterItems.find(i => i.id === pc.storage2_item_id)?.item_name || '-';
     const ram1 = state.masterItems.find(i => i.id === pc.ram1_item_id)?.item_name || '-';
     const ram2 = state.masterItems.find(i => i.id === pc.ram2_item_id)?.item_name || '-';
     const ram3 = state.masterItems.find(i => i.id === pc.ram3_item_id)?.item_name || '-';
     const vga = state.masterItems.find(i => i.id === pc.vga_item_id)?.item_name || '-';
+    const deptLabel = pc.department && String(pc.department).trim() !== '' ? String(pc.department).trim() : '- belum terpasang';
+    const statusLabel = pc.department ? `Terpasang di ${deptLabel}` : 'Ready in IT Storage (- belum terpasang)';
 
     pcSummaryData.push([
       idx + 1,
       pc.name,
       pc.chipset,
-      pc.department ? `Terpasang di ${pc.department}` : 'Ready in IT Storage',
+      deptLabel,
+      statusLabel,
       psu,
-      storage,
+      storage1,
+      storage2,
       ram1,
       ram2,
       ram3,
@@ -5595,6 +6607,8 @@ window.navigateTo = navigateTo;
 window.goBackNavigation = goBackNavigation;
 window.updateTopbarBackButton = updateTopbarBackButton;
 window.selectDepartmentAndNavigate = selectDepartmentAndNavigate;
+window.openPCDetailFromDashboard = openPCDetailFromDashboard;
+window.openInventoryByCategory = openInventoryByCategory;
 window.switchActiveDepartment = switchActiveDepartment;
 window.setInvCategoryFilter = setInvCategoryFilter;
 window.setDeptCatFilter = setDeptCatFilter;
@@ -5614,6 +6628,24 @@ window.renderPCMovements = renderPCMovements;
 window.setPCFilter = setPCFilter;
 window.switchPCMovementTab = switchPCMovementTab;
 window.openModalAddPC = openModalAddPC;
+window.cancelAndCloseAddPCModal = cancelAndCloseAddPCModal;
+window.syncMotherboardPreviewHeader = syncMotherboardPreviewHeader;
+window.filterAddPCComponents = filterAddPCComponents;
+window.handleAddPCComponentPick = handleAddPCComponentPick;
+window.clearAddPCAssemblyTray = clearAddPCAssemblyTray;
+window.removeTrayItemFromAssembly = removeTrayItemFromAssembly;
+window.selectTrayItemForClickAssign = selectTrayItemForClickAssign;
+window.handleTrayItemDragStart = handleTrayItemDragStart;
+window.handleSlotDragStart = handleSlotDragStart;
+window.handleSlotDragOver = handleSlotDragOver;
+window.handleSlotDragLeave = handleSlotDragLeave;
+window.handleDropOnMotherboardSlot = handleDropOnMotherboardSlot;
+window.handleTrayDragOver = handleTrayDragOver;
+window.handleDropToTray = handleDropToTray;
+window.handleMotherboardSlotClick = handleMotherboardSlotClick;
+window.unassignMotherboardSlot = unassignMotherboardSlot;
+window.filterInstallComponents = filterInstallComponents;
+window.filterSwapTargetPCs = filterSwapTargetPCs;
 window.handleCreatePCSubmit = handleCreatePCSubmit;
 window.openModalPCDetail = openModalPCDetail;
 window.toggleEditPCName = toggleEditPCName;
@@ -5631,21 +6663,34 @@ window.renderDepartmentWorkstations = renderDepartmentWorkstations;
 window.openModalDeptAddPC = openModalDeptAddPC;
 window.executeDeptAddPC = executeDeptAddPC;
 window.exportPCMovementsExcel = exportPCMovementsExcel;
+window.exportPCManagementExcel = exportPCManagementExcel;
 window.handleDirectDemoBypassWithEmail = handleDirectDemoBypassWithEmail;
 window.handleDirectDemoBypass = handleDirectDemoBypass;
 window.confirmDeletePC = confirmDeletePC;
 window.openDeletePCModalFromDetail = openDeletePCModalFromDetail;
 window.executeDeletePC = executeDeletePC;
 
+window.openModalEditItem = openModalEditItem;
+window.handleEditItemFilePreview = handleEditItemFilePreview;
+window.handleEditItemUrlPreview = handleEditItemUrlPreview;
+window.clearEditItemPhoto = clearEditItemPhoto;
+window.handleEditMasterItemSubmit = handleEditMasterItemSubmit;
+
 window.openModal = openModal;
 window.closeModal = closeModal;
 window.openModalInbound = openModalInbound;
 window.openItemInboundHistoryModal = openItemInboundHistoryModal;
 window.openInboundForCurrentItem = openInboundForCurrentItem;
+window.openTransferForCurrentItem = openTransferForCurrentItem;
+window.openEditForCurrentItem = openEditForCurrentItem;
+window.promptDeleteCurrentMasterItem = promptDeleteCurrentMasterItem;
+window.cancelDeleteCurrentMasterItem = cancelDeleteCurrentMasterItem;
+window.executeDeleteCurrentMasterItem = executeDeleteCurrentMasterItem;
 window.populatePOMasterItemDropdown = populatePOMasterItemDropdown;
 window.filterPOMasterItemDropdown = filterPOMasterItemDropdown;
 window.handlePOMasterItemSelect = handlePOMasterItemSelect;
 window.openModalTransfer = openModalTransfer;
+window.filterTransferItems = filterTransferItems;
 window.openModalReturn = openModalReturn;
 window.openModalPO = openModalPO;
 window.openModalPreloved = openModalPreloved;
@@ -5961,7 +7006,7 @@ function renderNotesCards() {
 
     const borderClass = isShared ? 'border-cyan' : 'border-amber';
 
-    return `
+  return `
       <div class="stat-card-modern ${borderClass} p-4 sm:p-5 flex flex-col justify-between group transition duration-300 relative cursor-pointer" onclick="handleCardClick(event, '${note.id}', '${note.type}')">
         <div>
           <!-- Header: Type Badge & Ownership Badge -->
@@ -6004,6 +7049,112 @@ function renderNotesCards() {
           ${deleteBtn}
         </div>
       </div>
+    `;
+  }).join('');
+}
+
+function setDashboardNotesFilter(filter) {
+  dashboardNotesFilter = filter || 'all';
+  document.querySelectorAll('.dash-note-filter-btn').forEach(btn => {
+    if (btn.dataset.filter === dashboardNotesFilter) {
+      btn.className = 'dash-note-filter-btn px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-500 text-slate-950 transition';
+    } else {
+      btn.className = 'dash-note-filter-btn px-2.5 py-1 rounded-lg text-[11px] font-semibold text-slate-300 hover:text-white transition';
+    }
+  });
+  renderDashboardNotesWidget();
+}
+
+function renderDashboardNotesWidget() {
+  const grid = document.getElementById('dashboard-notes-grid');
+  const empty = document.getElementById('dashboard-notes-empty');
+  const counter = document.getElementById('dashboard-notes-counter');
+  if (!grid) return;
+
+  const shared = (state.sharedNotes || []).map(n => ({ ...n, type: 'shared' }));
+  const priv = (state.privateNotes || [])
+    .filter(canUserAccessPrivateNote)
+    .map(n => ({ ...n, type: 'private' }));
+
+  const totalCount = shared.length + priv.length;
+  if (counter) counter.textContent = `${totalCount} Catatan`;
+
+  let list = [];
+  if (dashboardNotesFilter === 'shared') {
+    list = shared;
+  } else if (dashboardNotesFilter === 'private') {
+    list = priv;
+  } else {
+    list = [...shared, ...priv];
+  }
+
+  list.sort((a, b) => {
+    const da = new Date(a.updated_at || a.created_at || 0).getTime();
+    const db = new Date(b.updated_at || b.created_at || 0).getTime();
+    return db - da;
+  });
+
+  const topNotes = list.slice(0, 6);
+
+  if (topNotes.length === 0) {
+    grid.innerHTML = '';
+    grid.classList.add('hidden');
+    empty?.classList.remove('hidden');
+    return;
+  }
+
+  empty?.classList.add('hidden');
+  grid.classList.remove('hidden');
+
+  grid.innerHTML = topNotes.map(note => {
+    const isShared = note.type === 'shared';
+    const isOwner = canUserModifyNote(note, note.type);
+    const authorLabel = note.created_by || note.created_by_name || 'IT User';
+    const imageCount = countNoteImages(note);
+    const plainText = stripHtml(note.content || '').trim();
+    const snippet = plainText
+      ? (plainText.length > 95 ? plainText.substring(0, 95) + '...' : plainText)
+      : (imageCount > 0 ? `(${imageCount} foto terlampir)` : '(Belum ada isi catatan)');
+
+    return `
+      <button
+        type="button"
+        onclick="openNoteEditor('${note.id}', '${note.type}')"
+        class="stat-card-modern ${isShared ? 'border-cyan' : 'border-amber'} p-4 text-left flex flex-col justify-between group cursor-pointer transition w-full"
+      >
+        <div class="w-full min-w-0">
+          <div class="flex items-center justify-between gap-2 mb-2">
+            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${isShared ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30' : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'}">
+              <i class="fa-solid ${isShared ? 'fa-users' : 'fa-lock'} text-[9px]"></i>
+              <span>${isShared ? 'Note Bersama' : 'Note Pribadi'}</span>
+            </span>
+            <span class="text-[10px] font-mono ${isOwner ? 'text-emerald-400' : 'text-amber-300'} shrink-0">
+              ${isOwner ? '<i class="fa-solid fa-pen mr-1"></i>Edit' : '<i class="fa-solid fa-eye mr-1"></i>Baca'}
+            </span>
+          </div>
+
+          <h4 class="text-sm font-black text-white group-hover:text-amber-300 transition truncate">
+            ${escapeHtml(note.title || 'Catatan Tanpa Judul')}
+          </h4>
+
+          ${isShared ? `
+            <div class="text-[10px] text-cyan-300/90 mt-1 truncate font-mono">
+              <i class="fa-solid fa-user-pen mr-1 text-cyan-400"></i>${escapeHtml(authorLabel)}
+            </div>
+          ` : ''}
+
+          <p class="text-xs text-slate-400 line-clamp-2 mt-2 leading-relaxed font-sans">
+            ${escapeHtml(snippet)}
+          </p>
+        </div>
+
+        <div class="w-full flex items-center justify-between gap-2 pt-2.5 mt-3 border-t border-slate-800/80 text-[10px] font-mono text-slate-400">
+          <span class="text-amber-300/90 truncate">
+            <i class="fa-solid fa-clock-rotate-left mr-1"></i>${formatNoteDate(note.updated_at || note.created_at)}
+          </span>
+          ${imageCount > 0 ? `<span class="text-cyan-300 shrink-0"><i class="fa-regular fa-image mr-1"></i>${imageCount}</span>` : ''}
+        </div>
+      </button>
     `;
   }).join('');
 }
@@ -6676,6 +7827,7 @@ function saveCurrentNote(isInstant = false) {
   }
 
   updateNotesCounter();
+  renderDashboardNotesWidget();
 }
 
 function deleteCurrentOpenNote() {
@@ -6743,6 +7895,7 @@ function executeDeleteNote(id, type) {
     });
   }
 
+  renderDashboardNotesWidget();
   showToast('Catatan berhasil dihapus.', 'info');
 }
 
@@ -6867,6 +8020,8 @@ window.handleCardClick = handleCardClick;
 window.triggerNoteImageUpload = triggerNoteImageUpload;
 window.handleNoteImageUpload = handleNoteImageUpload;
 window.updateEditorToolbarStates = updateEditorToolbarStates;
+window.setDashboardNotesFilter = setDashboardNotesFilter;
+window.renderDashboardNotesWidget = renderDashboardNotesWidget;
 
 // ==============================================================================
 // 21. EVENT LISTENERS & APPLICATION BOOTSTRAP
